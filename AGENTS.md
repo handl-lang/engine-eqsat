@@ -33,8 +33,8 @@ live in `handl-lang/host:project/reports/engine-eqsat-spike.md`.
   `cond.py` guard port is an open design question (spike §6.2).
 - `src/builtin.rs` — the first law pack: `id_add`, `id_mul`,
   `double_neg`, `sub_to_add` (guard-free `SIMPLIFICATION_RULES`
-  ports from `mlopt_core.laws.tensor`) + `reshape_flatten` (the
-  attrs-bind demo).
+  ports from `mlopt_core.laws.tensor`) + `reshape_flatten_demo` (the
+  UNSOUND attrs-bind demo — matcher tests only, never a pack).
 - `src/engine.rs` — the public surface: `saturate`, `extract_best`,
   `optimize`, `size_cost`, `SaturateOptions`/`OptimizeOptions`/
   `StopPolicy`, `Saturated`/`OptimizeResult`, `Error`. Kernel

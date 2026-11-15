@@ -120,7 +120,7 @@ fn pat_decode_refuses_malformed_records() {
 fn law_record_round_trips_through_json() {
     for law in builtin::simplification()
         .into_iter()
-        .chain([builtin::reshape_flatten()])
+        .chain([builtin::reshape_flatten_demo()])
     {
         let data = law.to_data();
         // LAW_FORMAT = 2 field set, spelled like serialize.py.
@@ -569,9 +569,10 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     let expected = builtin::simplification();
     assert_eq!(simpl.laws(), expected.as_slice());
 
-    // laws/reshape_flatten.json — the attrs-bind demo.
-    let flat = LawSet::from_json(include_str!("../laws/reshape_flatten.json")).unwrap();
-    assert_eq!(flat.laws(), &[builtin::reshape_flatten()]);
+    // laws/reshape_flatten_demo.json — the UNSOUND attrs-bind demo
+    // (matcher coverage only; the `_demo` name is the warning).
+    let flat = LawSet::from_json(include_str!("../laws/reshape_flatten_demo.json")).unwrap();
+    assert_eq!(flat.laws(), &[builtin::reshape_flatten_demo()]);
 
     // And the records re-serialize byte-stably through the codec.
     for set in [simpl, flat] {

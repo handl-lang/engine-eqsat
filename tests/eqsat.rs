@@ -157,17 +157,18 @@ fn sub_to_add_fires_and_lowers_back() {
 
 #[test]
 fn attrs_payload_round_trips_through_a_rewrite() {
-    // tensor.reshape(x, attrs={"shape":[2,2]}) --(reshape_flatten)-->
+    // tensor.reshape(x, attrs={"shape":[2,2]}) --(reshape_flatten_demo)-->
     // tensor.flatten(x, attrs={"shape":[2,2]}) — the `__attrs__`
     // payload bound whole via `attrs_bind` and re-emitted verbatim
-    // (the spike's P0.5 finding, now through the public API).
+    // (the spike's P0.5 finding, now through the public API).  The
+    // law is an UNSOUND demo — matcher coverage only, never a pack.
     let shape = json!({"shape": [2, 2]});
     let x = kconst(json!(7));
     let input = KTerm::op_native_attrs("tensor.reshape", vec![x.clone()], shape.clone());
 
     let mut sat = eqsat::saturate(
         &[input],
-        &[builtin::reshape_flatten()],
+        &[builtin::reshape_flatten_demo()],
         &eqsat::SaturateOptions::spec(),
     )
     .expect("saturate");

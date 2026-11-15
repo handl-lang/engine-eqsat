@@ -106,7 +106,8 @@ honestly, because dim semantics over the bridge are the footgun spike
 
 `source`/`foreign` spell `PatSource`; `attrs` distinguishes
 `AttrsSpec::Lit` (`{"lit": v}`) from `AttrsSpec::Bind`
-(`{"bind": name}` — re-emitted verbatim, the `reshape_flatten` demo).
+(`{"bind": name}` — re-emitted verbatim, the `reshape_flatten_demo`
+attrs-bind demo).
 Attr metavariable names in `cond`/`dspec` keep the `"$attr:NAME"`
 spelling; term metavars are bare names, matching `BoundEnv`.
 

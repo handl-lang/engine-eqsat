@@ -888,14 +888,22 @@ pub fn all() -> Vec<Law> {
     laws
 }
 
-/// A demonstration law for the attrs-bind path (the spike's
-/// `reshape → flatten`): `tensor.reshape(x, attrs=?a) →
-/// tensor.flatten(x, attrs=?a)` — the `__attrs__` payload is bound
-/// whole and re-emitted verbatim. Not part of any pack; it exists
-/// to pin the attrs round-trip in tests.
-pub fn reshape_flatten() -> Law {
+/// **UNSOUND DEMO — not a law; never ship it.** The spike's
+/// `reshape → flatten` attrs-bind demonstration: `tensor.reshape(x,
+/// attrs=?a) → tensor.flatten(x, attrs=?a)` — the `__attrs__`
+/// payload is bound whole and re-emitted verbatim.
+///
+/// reshape→flatten is NOT value- or shape-preserving in general
+/// (reshape admits arbitrary re-layouts; flatten commits to one), so
+/// this rewrite is a non-equivalence kept ONLY to pin the
+/// `attrs_bind` round-trip in tests. The `_demo` suffix is the
+/// warning: it is in NO pack ([`simplification`]/[`categorical`]/
+/// [`all`] exclude it), and passing it to `saturate`/`optimize`
+/// asserts an equivalence that does not hold. Use it for matcher
+/// tests only.
+pub fn reshape_flatten_demo() -> Law {
     Law::new(
-        "reshape_flatten",
+        "reshape_flatten_demo",
         Pat::Op(
             OpPat::new("tensor.reshape")
                 .arg(Pat::var("x"))

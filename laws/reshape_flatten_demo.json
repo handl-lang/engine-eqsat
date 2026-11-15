@@ -23,7 +23,7 @@
       "source": "native"
     },
     "missing_hooks": [],
-    "name": "reshape_flatten",
+    "name": "reshape_flatten_demo",
     "rhs": {
       "args": [
         {
