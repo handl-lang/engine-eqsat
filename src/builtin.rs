@@ -2881,7 +2881,7 @@ fn sdpa_expand_rules() -> Vec<Law> {
 //  `tval`/`tapp` tensor values, procedural `check`/`derive` hooks
 //  (`conv_bn_fold`'s `missing_hooks`), and the `prim:synop*` minted
 //  records' backend-side synthetic-op denotations (their fold
-//  records ship as `laws/prim_folds.json` data instead).
+//  records ship as the kit-eqsat `prim_folds` pack data instead).
 // ---------------------------------------------------------------------------
 
 /// `mul_unsq_nat`: `unsqueeze(u,d) · unsqueeze(v,d) →
@@ -3729,7 +3729,7 @@ pub fn simplification() -> Vec<Law> {
 /// records stay out of the pack: their fold patterns are portable
 /// LAW_FORMAT=2 data but the synthetic `synop_*` operator
 /// denotations are domain-side, so they ship as the
-/// `laws/prim_folds.json` corpus instead (never in `all`).
+/// kit-eqsat `prim_folds` corpus instead (never in `all`).
 pub fn categorical() -> Vec<Law> {
     let mut laws = vec![
         distribute_matmul_over_add(),

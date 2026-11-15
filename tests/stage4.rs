@@ -9,6 +9,15 @@ use hnl_engine::Term as KTerm;
 use hnl_engine_eqsat::{self as eqsat, Law, LawSet, builtin};
 use serde_json::json;
 
+/// The canonical `LAW_FORMAT = 2` corpus lives in `handl-kit-eqsat`
+/// (`data/laws/*.json`, ADR-0177 §1); `laws/` in this repo keeps only
+/// the `reshape_flatten_demo` matcher demo.
+fn pack(name: &str) -> &'static str {
+    handl_kit_eqsat::law_pack(name)
+        .unwrap_or_else(|| panic!("kit-eqsat has no pack {name:?}"))
+        .json
+}
+
 fn op(name: &str, args: Vec<KTerm>) -> KTerm {
     KTerm::op_native(name, args)
 }
@@ -520,22 +529,22 @@ fn conv_channel_scale_rev_fires_on_absorbed_form() {
 
 #[test]
 fn stage4_corpus_files_load_and_match_builtin_packs() {
-    let bn = LawSet::from_json(include_str!("../laws/batch_norm.json")).unwrap();
+    let bn = LawSet::from_json(pack("batch_norm")).unwrap();
     assert_eq!(bn.laws(), builtin::batch_norm().as_slice());
     assert_eq!(bn.compile().unwrap().len(), bn.laws().len());
 
-    let conv = LawSet::from_json(include_str!("../laws/conv_folds.json")).unwrap();
+    let conv = LawSet::from_json(pack("conv_folds")).unwrap();
     assert_eq!(conv.laws(), builtin::conv_folds().as_slice());
     assert_eq!(conv.laws().len(), 60);
     assert_eq!(conv.compile().unwrap().len(), conv.laws().len());
 
-    // laws/prim_folds.json — the 60 minted `prim:synop*` fold records
+    // kit-eqsat pack "prim_folds" — the 60 minted `prim:synop*` fold records
     // as LAW_FORMAT=2 data.  They compile (patterns + record fields
     // parse) but are NOT in any builtin pack: the synthetic
     // `synop_*` operator denotations are domain-side and require a
     // consumer that registered them — matching Python, where the
     // folds only fire on terms containing those ops.
-    let prim = LawSet::from_json(include_str!("../laws/prim_folds.json")).unwrap();
+    let prim = LawSet::from_json(pack("prim_folds")).unwrap();
     assert_eq!(prim.laws().len(), 60);
     assert!(prim.laws().iter().all(|l| l.name.starts_with("prim:")));
     assert!(prim.laws().iter().all(|l| l.serializable));

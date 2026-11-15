@@ -40,8 +40,9 @@
 //!   remain unported and refuse by name
 //!   ([`engine::Error::GuardUnsupported`]/
 //!   [`engine::Error::UnserializableLaw`] — the `missing_hooks`
-//!   honesty posture, never a silent drop). The reference corpus
-//!   lives in `laws/*.json`, including `prim_folds.json` — the 60
+//!   honesty posture, never a silent drop). The canonical corpus
+//!   lives in `handl-kit-eqsat` (`data/laws/*.json`, consumed here
+//!   via `LAW_PACKS` in tests), including `prim_folds` — the 60
 //!   minted `prim:synop*` fold records as data (their synthetic-op
 //!   denotations stay domain-side; no builtin pack carries them).
 //! * **Shape inference** — [`shape`] ports `mlopt_core.typing`'s
@@ -104,7 +105,8 @@
 //!   refuse by name at compile
 //!   ([`engine::Error::GuardUnsupported`]/
 //!   [`engine::Error::UnserializableLaw`]), never approximated.
-//!   `prim:synop*` folds ship as `laws/prim_folds.json` data only:
+//!   `prim:synop*` folds ship as the `prim_folds` kit pack data
+//!   only:
 //!   their synthetic operator denotations are domain-side and a
 //!   consumer must register them before the records can fire.
 //! * **Backend-profiled cost models.** Roofline/fusion/executor

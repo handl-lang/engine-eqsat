@@ -22,7 +22,7 @@
 //! * `terms`/`check_terms` are `hnl_engine::Term` serde JSON
 //!   (externally-tagged `{"Op": …}` / `{"Const": …}` / …).
 //! * `laws` are `LAW_FORMAT = 2` records in the `pat` authoring
-//!   spelling — the same corpus `laws/*.json` ships.
+//!   spelling — the same corpus the `handl-kit-eqsat` packs ship.
 //! * `cost` is a `CostSpec` record; `null`/absent defaults to
 //!   `{"kind": "size"}`.
 //!

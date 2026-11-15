@@ -1,6 +1,7 @@
 //! [`LawSet`] — an ordered collection of [`Law`]s, loadable from the
-//! JSON record corpus (design doc §1: `laws/*.json` is the reference
-//! corpus until `kit-eqsat` exists).
+//! JSON record corpus (design doc §1: the canonical corpus is
+//! `handl-kit-eqsat`'s `data/laws/*.json`, ADR-0177 §1; this repo's
+//! `laws/` keeps only the `reshape_flatten_demo` matcher demo).
 //!
 //! [`LawSet::from_json`] accepts three top-level shapes:
 //!

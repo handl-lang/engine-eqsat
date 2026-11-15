@@ -23,6 +23,13 @@ serde_json = "1"
 
 [dev-dependencies]
 serde_json = "1"
+# kit-eqsat — the canonical home of the LAW_FORMAT=2 corpus
+# (ADR-0177 §1 / ADR-0178): the contract tests decode the packs
+# through `LAW_PACKS`/`law_pack(name).json` instead of vendoring
+# `laws/*.json`. Dev-dep only: the shipped crate's corpus is the
+# `builtin` constructors; the JSON records are test fixtures +
+# `emit_laws` output destined for kit-eqsat's `data/laws/`.
+handl-kit-eqsat = { git = "https://github.com/handl-lang/kit-eqsat", branch = "main" }
 
 # dev-link: begin
 [patch."https://github.com/handl-lang/egraph"]
@@ -30,6 +37,20 @@ handl-egraph = { path = "../egraph" }
 [patch."https://github.com/handl-lang/engine"]
 hnl-engine = { path = "../engine" }
 [patch."https://github.com/handl-lang/kernel"]
+handl-lib-bytes = { path = "../kernel/crates/bytes" }
+handl-lib-cmp = { path = "../kernel/crates/cmp" }
+handl-lib-combinators = { path = "../kernel/crates/combinators" }
+handl-defining-handl = { path = "../kernel/crates/defining-handl" }
+handl-lib-error = { path = "../kernel/crates/error" }
+handl-ext = { path = "../kernel/crates/handl-ext" }
 handl-language = { path = "../kernel/crates/handl-language" }
 handl-value = { path = "../kernel/crates/handl-value" }
+handl-lib-mood = { path = "../kernel/crates/mood" }
+handl-lib-obj = { path = "../kernel/crates/obj" }
+handl-lib-ops = { path = "../kernel/crates/ops" }
+handl-lib-prim = { path = "../kernel/crates/prim" }
+handl-lib-prim-handl = { path = "../kernel/crates/prim-handl" }
+handl-lib-type = { path = "../kernel/crates/type" }
+[patch."https://github.com/handl-lang/kit-eqsat"]
+handl-kit-eqsat = { path = "../kit-eqsat/crates/handl-kit-eqsat" }
 # dev-link: end

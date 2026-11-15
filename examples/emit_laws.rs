@@ -1,22 +1,35 @@
-//! Emit the `laws/*.json` reference corpus — the builtin packs
-//! serialized to the `LAW_FORMAT = 2` record form (design doc §1).
+//! Emit the `LAW_FORMAT = 2` reference corpus — the builtin packs
+//! serialized to record form (design doc §1).
+//!
+//! **Canonical home: `handl-kit-eqsat`** (`data/laws/*.json`,
+//! ADR-0177 §1 / ADR-0178). This example is the *regeneration path*:
+//! after changing [`hnl_engine_eqsat::builtin`] or the record codec,
+//! emit each pack and sync the output into kit-eqsat — the bytes are
+//! never vendored back into this repo (`laws/` keeps only the
+//! `reshape_flatten_demo` matcher demo).
 //!
 //! Usage:
 //!
 //! ```sh
-//! cargo run --example emit_laws -- simplification > laws/simplification.json
+//! cargo run --example emit_laws -- simplification > /tmp/simplification.json
 //! cargo run --example emit_laws -- reshape_flatten_demo > laws/reshape_flatten_demo.json
-//! cargo run --example emit_laws -- prior_art > laws/prior_art.json
-//! cargo run --example emit_laws -- categorical > laws/categorical.json
-//! cargo run --example emit_laws -- pointwise_factor > laws/pointwise_factor.json
-//! cargo run --example emit_laws -- attention > laws/attention.json
-//! cargo run --example emit_laws -- batch_norm > laws/batch_norm.json
-//! cargo run --example emit_laws -- conv_folds > laws/conv_folds.json
+//! cargo run --example emit_laws -- prior_art > /tmp/prior_art.json
+//! cargo run --example emit_laws -- categorical > /tmp/categorical.json
+//! cargo run --example emit_laws -- pointwise_factor > /tmp/pointwise_factor.json
+//! cargo run --example emit_laws -- attention > /tmp/attention.json
+//! cargo run --example emit_laws -- batch_norm > /tmp/batch_norm.json
+//! cargo run --example emit_laws -- conv_folds > /tmp/conv_folds.json
 //! ```
 //!
-//! Regenerate after changing [`hnl_engine_eqsat::builtin`] or the
-//! record codec; `tests/contracts.rs` loads these files, so a stale
-//! corpus fails the suite.
+//! Then copy the `/tmp/*.json` outputs over
+//! `../kit-eqsat/crates/handl-kit-eqsat/data/laws/<name>.json` (except
+//! `reshape_flatten_demo`, which stays engine-local).
+//!
+//! `prim_folds` has **no emit arm by design**: it is the 60 minted
+//! `prim:synop*` fold records — data with no `builtin` constructor —
+//! maintained directly in kit-eqsat. The contract tests load every
+//! pack through `handl_kit_eqsat::law_pack(name).json`, so a stale
+//! kit corpus fails the suite.
 
 use hnl_engine_eqsat::{LawSet, builtin};
 

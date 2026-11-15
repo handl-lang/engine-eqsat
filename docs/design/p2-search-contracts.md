@@ -113,13 +113,17 @@ spelling; term metavars are bare names, matching `BoundEnv`.
 
 ### Where it lives
 
-`kit-eqsat` (the KIT-layer repo ADR-0175 names — it does not exist
-yet). Until then, records live in this repo under `laws/*.json` as
-the reference corpus, loaded by a `law::from_data` /
-`LawSet::from_json` API added to `hnl-engine-eqsat`. The minted store
-(`minted.db`) keeps its own serialization; `kit-eqsat` is where its
-rows are *projected* into this record format at admission time —
-the store stays the ledger, the record is the interchange.
+`kit-eqsat` (the KIT-layer repo ADR-0175 names) — landed: the
+canonical corpus is `handl-kit-eqsat`'s `data/laws/*.json`, consumed
+here through the `handl-kit-eqsat` dependency (`LAW_PACKS` /
+`law_pack(name).json`) in the contract tests. This repo's `laws/`
+keeps only `reshape_flatten_demo.json` (the UNSOUND attrs-bind
+matcher demo, engine-only by design); `examples/emit_laws.rs` is the
+regeneration path from the `builtin` constructors to records, whose
+output is synced into kit-eqsat. The minted store (`minted.db`) keeps
+its own serialization; `kit-eqsat` is where its rows are *projected*
+into this record format at admission time — the store stays the
+ledger, the record is the interchange.
 
 ### Honesty fields
 

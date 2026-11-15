@@ -1,7 +1,8 @@
 //! Tests for the P2 search contracts, stage 1 (design doc
 //! `docs/design/p2-search-contracts.md`, ADR-0177): the law JSON
 //! record codec, `CostSpec`, `LawSet`, the `SearchEngine` trait, and
-//! the `laws/*.json` reference corpus.
+//! the `LAW_FORMAT = 2` corpus — canonical in `handl-kit-eqsat`
+//! (ADR-0177 §1), consumed here via `LAW_PACKS`.
 
 use handl_egraph::from_kernel;
 use hnl_engine::Term as KTerm;
@@ -14,6 +15,15 @@ use serde_json::{Value, json};
 
 fn kconst(v: Value) -> KTerm {
     KTerm::constant(v)
+}
+
+/// The canonical `LAW_FORMAT = 2` corpus lives in `handl-kit-eqsat`
+/// (`data/laws/*.json`, ADR-0177 §1); `laws/` in this repo keeps only
+/// the `reshape_flatten_demo` matcher demo.
+fn pack(name: &str) -> &'static str {
+    handl_kit_eqsat::law_pack(name)
+        .unwrap_or_else(|| panic!("kit-eqsat has no pack {name:?}"))
+        .json
 }
 
 fn native_op(name: &str, args: Vec<KTerm>) -> KTerm {
@@ -524,7 +534,7 @@ fn optimize_spec_prices_engine_side() {
             kconst(json!(0)),
         ],
     );
-    let set = LawSet::from_json(include_str!("../laws/simplification.json")).unwrap();
+    let set = LawSet::from_json(pack("simplification")).unwrap();
     let out = eqsat::optimize_spec(
         &input,
         set.laws(),
@@ -547,7 +557,7 @@ fn optimize_spec_prices_engine_side() {
 }
 
 // ---------------------------------------------------------------------------
-//  SearchEngine trait + the laws/*.json corpus
+//  SearchEngine trait + the kit-eqsat LAW_FORMAT=2 corpus
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -556,7 +566,7 @@ fn search_engine_trait_drives_the_corpus() {
     let engine = eqsat::EGraphEngine;
     assert_eq!(engine.name(), "eqsat");
 
-    let set = LawSet::from_json(include_str!("../laws/simplification.json")).unwrap();
+    let set = LawSet::from_json(pack("simplification")).unwrap();
     assert_eq!(set.len(), builtin::simplification().len());
     assert!(set.compile().is_ok());
 
@@ -585,41 +595,42 @@ fn search_engine_trait_drives_the_corpus() {
 
 #[test]
 fn laws_corpus_files_load_and_match_the_builtin_packs() {
-    // laws/simplification.json — the guard-free SIMPLIFICATION_RULES
-    // ports, as records.
-    let simpl = LawSet::from_json(include_str!("../laws/simplification.json")).unwrap();
+    // kit-eqsat pack "simplification" — the guard-free
+    // SIMPLIFICATION_RULES ports, as records.
+    let simpl = LawSet::from_json(pack("simplification")).unwrap();
     let expected = builtin::simplification();
     assert_eq!(simpl.laws(), expected.as_slice());
 
-    // laws/prior_art.json — the stage-1-portable PRIOR_ART_RULES
+    // kit-eqsat pack "prior_art" — the stage-1-portable PRIOR_ART_RULES
     // slice: const-guarded folds whose `cond`/`dspec` trees are the
     // `cond.py` spelling carried as record data.
-    let pa = LawSet::from_json(include_str!("../laws/prior_art.json")).unwrap();
+    let pa = LawSet::from_json(pack("prior_art")).unwrap();
     assert_eq!(pa.laws(), builtin::prior_art().as_slice());
     // Every guarded record compiles — the corpus exercises the whole
     // stage-1 vocabulary end to end.
     assert_eq!(pa.compile().unwrap().len(), pa.laws().len());
 
-    // laws/categorical.json — the guard-free CATEGORICAL_RULES
+    // kit-eqsat pack "categorical" — the guard-free CATEGORICAL_RULES
     // slice (matmul/linear algebra + qkv_fuse).
-    let cat = LawSet::from_json(include_str!("../laws/categorical.json")).unwrap();
+    let cat = LawSet::from_json(pack("categorical")).unwrap();
     assert_eq!(cat.laws(), builtin::categorical().as_slice());
     assert_eq!(cat.compile().unwrap().len(), cat.laws().len());
 
-    // laws/pointwise_factor.json — the opt-in unguarded
+    // kit-eqsat pack "pointwise_factor" — the opt-in unguarded
     // POINTWISE_FACTOR_RULES pair.
-    let pf = LawSet::from_json(include_str!("../laws/pointwise_factor.json")).unwrap();
+    let pf = LawSet::from_json(pack("pointwise_factor")).unwrap();
     assert_eq!(pf.laws(), builtin::pointwise_factor().as_slice());
     assert_eq!(pf.compile().unwrap().len(), pf.laws().len());
 
-    // laws/attention.json — the full SDPA_EXPAND_RULES opt-in pack
+    // kit-eqsat pack "attention" — the full SDPA_EXPAND_RULES opt-in pack
     // (stage 4 ported the `dim` dspec channel the scale-free
     // key-sets mint `1/√(q[-1])` through).
-    let att = LawSet::from_json(include_str!("../laws/attention.json")).unwrap();
+    let att = LawSet::from_json(pack("attention")).unwrap();
     assert_eq!(att.laws(), builtin::attention().as_slice());
     assert_eq!(att.compile().unwrap().len(), att.laws().len());
 
     // laws/reshape_flatten_demo.json — the UNSOUND attrs-bind demo
+    // (engine-local; kit-eqsat excludes it by design)
     // (matcher coverage only; the `_demo` name is the warning).
     let flat = LawSet::from_json(include_str!("../laws/reshape_flatten_demo.json")).unwrap();
     assert_eq!(flat.laws(), &[builtin::reshape_flatten_demo()]);
