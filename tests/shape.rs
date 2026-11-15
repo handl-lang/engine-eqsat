@@ -87,6 +87,31 @@ fn plain_leaves_are_unknown_not_guessed() {
 }
 
 #[test]
+fn mlopt_bridge_leaf_declares_shape() {
+    // The `mlopt_orchestrator.eqsat` `_LEAF_PREFIX` encoding: a
+    // `Const` string `__mlopt_leaf__:{"k","n","s"}` carrying a typed
+    // `Var`/`Param` leaf.  `s` is the declared `TensorType` shape —
+    // it MUST read, or broadcast guards see a phantom scalar and
+    // pass where the real shapes would decline (the WP4
+    // `mul_unsq_nat` parity failure).
+    let a = KTerm::constant(json!(
+        "__mlopt_leaf__:{\"k\":\"var\",\"n\":\"a\",\"s\":[4,6]}"
+    ));
+    assert_eq!(shape_of_k(&a), tuple(&[4, 6]));
+    // `s: null` — a shape-less Var/Param is unknown-rank, NOT scalar.
+    let u = KTerm::constant(json!(
+        "__mlopt_leaf__:{\"k\":\"param\",\"n\":\"w\",\"s\":null}"
+    ));
+    assert_eq!(shape_of_k(&u), Shape::Unknown);
+    // Malformed payloads decline to Unknown, never to scalar `()`.
+    let bad = KTerm::constant(json!("__mlopt_leaf__:{not json"));
+    assert_eq!(shape_of_k(&bad), Shape::Unknown);
+    // A genuine scalar Const is still `()` — the prefix is what
+    // distinguishes a bridge leaf from a scalar literal.
+    assert_eq!(shape_of_k(&KTerm::constant(json!(3))), Shape::Tuple(vec![]));
+}
+
+#[test]
 fn elementwise_broadcast() {
     let a = shaped(&[2, 3]);
     let b = shaped(&[3]);

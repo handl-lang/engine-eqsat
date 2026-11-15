@@ -2103,8 +2103,46 @@ fn leaf_info(key: &str) -> TensorInfo {
     }
 }
 
+/// The mlopt-search bridge leaf convention —
+/// `mlopt_orchestrator.eqsat._LEAF_PREFIX`: a `Const` *string*
+/// `__mlopt_leaf__:{"k":…,"n":…,"s":…}` carrying a typed `Var`/`Param`
+/// leaf, where `s` is the declared `TensorType` shape (`null` = the
+/// shape is wholly unknown — never a scalar).  The kernel `Term` has
+/// no variable leaf, so the Python bridge encodes leaves this way;
+/// decoding the payload here is what keeps shape guards honest on
+/// bridged terms.  Without the read every bridge leaf fell through to
+/// the scalar-`()` `Const` default, and broadcast guards
+/// (`bcast-into`/`bcast-eq`/`unsq-out`) treated phantom scalars as
+/// broadcast-compatible — the WP4 `mul_unsq_nat` parity failure: the
+/// pad laws fired on real `(4,6)` operands and extraction produced
+/// `mul(a, unsqueeze(b, -1))`, a term that cannot materialise
+/// (`4` vs `6` at dim 1).
+const MLOPT_LEAF_PREFIX: &str = "__mlopt_leaf__:";
+
+/// Decode a `__mlopt_leaf__:` payload's declared shape.  `Some` iff
+/// `v` is a string carrying the prefix — a matched-but-malformed
+/// payload reads [`Shape::Unknown`] (honest decline), and `s: null`/
+/// absent reads [`Shape::Unknown`] too: a shape-less `Var`/`Param` is
+/// an unknown-rank tensor, *not* a scalar.
+fn mlopt_leaf_info(v: &Value) -> Option<TensorInfo> {
+    let s = v.as_str()?;
+    let payload = s.strip_prefix(MLOPT_LEAF_PREFIX)?;
+    let shape = serde_json::from_str::<Value>(payload)
+        .ok()
+        .and_then(|rec| rec.get("s").cloned())
+        .and_then(|s| match s {
+            Value::Null => None,
+            other => json_dims(&other),
+        });
+    Some(TensorInfo {
+        shape: shape.map_or(Shape::Unknown, Shape::Tuple),
+        dtype: None,
+    })
+}
+
 /// The leaf info of a decoded kernel term: `Const` reports `()`
-/// (a `__tensor__` wire value reports its declared shape); `Opaque`
+/// (a `__tensor__` wire value reports its declared shape, and a
+/// `__mlopt_leaf__:` bridge leaf its `TensorType` shape); `Opaque`
 /// reads `shape`/`__tensor__` payloads; other variants recurse through
 /// the bridge (they cannot loop — `Const`/`Opaque` are the only
 /// leaf-producing variants).
@@ -2112,6 +2150,9 @@ fn kernel_leaf_info(kt: &KernelTerm) -> TensorInfo {
     match kt {
         KernelTerm::Const { value } => {
             if let Some(info) = tensor_wire_info(value) {
+                return info;
+            }
+            if let Some(info) = mlopt_leaf_info(value) {
                 return info;
             }
             TensorInfo {
@@ -2124,10 +2165,14 @@ fn kernel_leaf_info(kt: &KernelTerm) -> TensorInfo {
     }
 }
 
-/// The leaf info of a raw JSON payload: `__tensor__` wire values and
-/// bare `{"shape": […]}` records both read; `dtype` rides along.
+/// The leaf info of a raw JSON payload: `__tensor__` wire values,
+/// `__mlopt_leaf__:` bridge-leaf strings, and bare `{"shape": […]}`
+/// records all read; `dtype` rides along.
 fn json_leaf_info(v: &Value) -> TensorInfo {
     if let Some(info) = tensor_wire_info(v) {
+        return info;
+    }
+    if let Some(info) = mlopt_leaf_info(v) {
         return info;
     }
     if let Value::Object(map) = v

@@ -1223,6 +1223,64 @@ fn unsq_pad_family_fires_and_vetoes() {
     assert_no_fire(&input, &builtin::mul_unsq_pad_l());
 }
 
+/// A `__mlopt_leaf__:` bridge leaf — the `mlopt_orchestrator.eqsat`
+/// `_LEAF_PREFIX` encoding of a typed `Var`/`Param` (`s` = declared
+/// `TensorType` shape).  Regression for the WP4 `mul_unsq_nat`
+/// parity failure: these leaves MUST feed shape inference, or every
+/// broadcast guard sees a phantom scalar `()` and fires where the
+/// real shapes would decline.
+fn bridge_leaf(name: &str, shape: serde_json::Value) -> KTerm {
+    kconst(json!(format!(
+        "__mlopt_leaf__:{{\"k\":\"var\",\"n\":\"{name}\",\"s\":{shape}}}"
+    )))
+}
+
+#[test]
+fn unsq_pad_vetoes_on_bridge_leaf_shapes() {
+    // The WP4 `mul_unsq_nat` repro, verbatim: `a.unsqueeze(-1) *
+    // b.unsqueeze(-1)` with `a`,`b` of shape `[4,6]` lifts both
+    // operands to `[4,6,1]`.  Stripping either unsqueeze yields
+    // `mul(a, unsq(b))` / `mul(unsq(a), b)` — operands `[4,6]` and
+    // `[4,6,1]` that cannot broadcast (`4` vs `6` at dim 1).  The
+    // guard must decline; before the leaf-shape fix the phantom
+    // scalar shapes made `bcast-eq`/`bcast-into` pass vacuously.
+    let (a, b) = (
+        bridge_leaf("a", json!([4, 6])),
+        bridge_leaf("b", json!([4, 6])),
+    );
+    let lifted = |t: &KTerm| op_attrs("unsqueeze", vec![t.clone()], json!({"dim": -1}));
+    let input = native_op("mul", vec![lifted(&a), lifted(&b)]);
+    assert_no_fire(&input, &builtin::mul_unsq_pad_l());
+    assert_no_fire(&input, &builtin::mul_unsq_pad_r());
+    let laws = [builtin::mul_unsq_pad_l(), builtin::mul_unsq_pad_r()];
+    let sat = eqsat::saturate(
+        std::slice::from_ref(&input),
+        &laws,
+        &eqsat::SaturateOptions::spec(),
+    )
+    .expect("saturate");
+    assert!(
+        sat.graph.merge_log().iter().all(|e| e.rule.is_none()),
+        "pad laws merged under bridge-leaf shapes: {:?}",
+        sat.graph.merge_log()
+    );
+}
+
+#[test]
+fn unsq_pad_still_fires_on_bridge_leaf_shapes() {
+    // Positive control: the same encoding must not over-decline.
+    // `u=[4]` lifted by `unsqueeze(dim=0)` to `[1,4]` against `v=[1,4]`
+    // — grids coincide, the pad view is dead.
+    let (u, v) = (
+        bridge_leaf("u", json!([4])),
+        bridge_leaf("v", json!([1, 4])),
+    );
+    let lifted = |t: &KTerm| op_attrs("unsqueeze", vec![t.clone()], json!({"dim": 0}));
+    let input = native_op("mul", vec![lifted(&u), v.clone()]);
+    let expected = native_op("mul", vec![u, v]);
+    assert_fires(&input, &builtin::mul_unsq_pad_l(), &expected);
+}
+
 #[test]
 fn mul_reshape_inert_l_fires_and_vetoes() {
     // reshape(u[4] → [1,4]) is broadcast-inert against v=[1,4].
