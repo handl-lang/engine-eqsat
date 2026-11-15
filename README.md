@@ -36,20 +36,48 @@ assert_eq!(out.term, Term::constant(json!(2)));
 
 ## API surface
 
-- [`optimize`] — lift → saturate → extract → lower, one call.
-- [`saturate`] / [`extract_best`] — the staged form; the saturated
+- [`optimize`] / [`saturate`] / [`extract_best`] — lift → saturate →
+  extract → lower over kernel `Term`s; the saturated
   [`EGraph`](https://docs.rs/handl-egraph) (provenance included) is
   returned for inspection.
-- [`Law`] + [`pat`] — the law/pattern language. Unconditional laws
-  only for now; guards (`cond.py`), serialized law data
-  (`kit-eqsat`), and cost-model DSLs are the open P2 questions (see
-  `handl-lang/host:project/reports/engine-eqsat-spike.md` §6).
+- [`Law`] + [`pat`] — the law/pattern language, plus the P2
+  contracts (ADR-0177, stages 1–4 landed):
+  - **law records** — `LAW_FORMAT = 2` JSON via
+    `Law::to_data`/`from_data` and `lawset::LawSet::from_json` /
+    `from_data`; `cond`/`dspec` guards are *interpreted* by
+    `guard` over `handl_egraph::BoundEnv` (the `cond.py` port,
+    incl. stage-4's flat-map/repeat pairing guards and shape-reading
+    dspec channels). The tensor channels (`tval`/`tapp`) and
+    procedural `check`/`derive` hooks refuse by name — the
+    `missing_hooks` honesty posture, never a silent drop.
+  - **shape inference** — `shape` ports `mlopt_core.typing`'s shape
+    algebra (`Tuple`/`Unknown`/`Invalid`; `None` extents for
+    unproven dims).
+  - **cost specs** — `cost::CostSpec` (`count`/`size`/`op_table`)
+    with `optimize_spec`/`extract_best_spec`; `{"flops": …}`
+    formulas price `+∞` on anything unproven.
+  - **engine trait** — `engine::SearchEngine` over `LawSet` +
+    `CostSpec` data, `EGraphEngine` the sole impl; `src/bin/
+    eqsat-run.rs` is the CLI front end.
+- **law corpus** — the canonical `LAW_FORMAT = 2` corpus (243
+  records, 8 packs) lives in
+  [`handl-kit-eqsat`](https://github.com/handl-lang/kit-eqsat)
+  (`data/laws/*.json`), consumed here as a dev-dependency in the
+  contract tests. `laws/` keeps only `reshape_flatten_demo.json`
+  (the UNSOUND attrs-bind matcher demo, quarantined engine-side);
+  `examples/emit_laws.rs` regenerates pack records from the `builtin`
+  constructors — its output is synced into kit-eqsat, never vendored
+  back.
 
 ## Status
 
-v1 scaffold + first working slice: the interpretation shell, the
-pattern compiler, four ported `SIMPLIFICATION_RULES` identities, and
-the attrs-bind round-trip. Git-install only (`publish = false`).
+P2 stages 1–4 landed: unconditional *and* `cond`/`dspec`-guarded law
+packs ported from `mlopt_core.laws.tensor` (`simplification`,
+`categorical`, opt-in `prior_art`/`pointwise_factor`/`attention`,
+plus the kit-side `prim_folds` minted records), the serialized law
+format, the guard interpreter, shape inference, cost specs, and the
+`SearchEngine` trait. ADR-0177 remains proposed pending ratification.
+Git-install only (`publish = false`).
 
 ## License
 

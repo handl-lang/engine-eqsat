@@ -11,11 +11,17 @@ answers spike §6 questions 1–5 (`host/project/reports/
 engine-eqsat-spike.md`). Spike §6.6 (the differential harness) is
 acknowledged but scoped as migration work, not a contract.
 
-Current state: `hnl-engine-eqsat` ships `pat`/`law`/`builtin`/`engine`
-— unconditional laws only, Rust-valued `Law`s, `cost_fn` closures over
-kernel `Term`s, and `ProofEdge`/`Application` provenance inspectable
-on `Saturated::graph`. Nothing below breaks that API; every decision
-extends it.
+Current state: stages 1–4 have landed — `Law`/`LawSet` implement the
+`LAW_FORMAT = 2` record (§1) with `cond`/`dspec` interpreted by
+`guard` over `BoundEnv`; `shape` carries the stage-2/3 inference
+(§2); `cost::CostSpec` (`count`/`size`/`op_table`) and the
+`engine::SearchEngine` trait (§§3–5) are in, with the canonical
+corpus consumed from `handl-kit-eqsat`. `ProofEdge`/`Application`
+provenance stays inspectable on `Saturated::graph`. What remains
+open: the `tval`/`tapp` tensor channels and procedural
+`check`/`derive` hooks (refused by name), roofline/fusion/executor
+cost models (stay Python-side backend profiles), and the
+differential harness against the Python oracle.
 
 ---
 
