@@ -1,0 +1,35 @@
+[package]
+name = "hnl-engine-eqsat"
+version = "0.1.0"
+edition = "2024"
+description = "The e-graph search interpretation over kernel `Term`s (ADR-0174 P2 / ADR-0175): equality saturation + deterministic extraction, speaking only `hnl_engine::Term` at the boundary."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/handl-lang/engine-eqsat"
+readme = "README.md"
+keywords = ["handl", "engine", "egraph", "equality-saturation", "search"]
+categories = ["development-tools", "compilers"]
+# Git-install only: https://github.com/handl-lang/engine-eqsat (no crates.io).
+publish = false
+
+[dependencies]
+# egraph — the finished e-graph substrate (union-find, compiled matcher,
+# bounded saturation, deterministic extraction, ProofEdge provenance,
+# and the total kernel<->pattern `term_bridge`).
+handl-egraph = { git = "https://github.com/handl-lang/egraph", branch = "main" }
+# engine — the arrow-calculus `Term` kernel; the interpretation's only
+# term type at the boundary.
+hnl-engine = { git = "https://github.com/handl-lang/engine", branch = "main" }
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"
+
+# dev-link: begin
+[patch."https://github.com/handl-lang/egraph"]
+handl-egraph = { path = "../egraph" }
+[patch."https://github.com/handl-lang/engine"]
+hnl-engine = { path = "../engine" }
+[patch."https://github.com/handl-lang/kernel"]
+handl-language = { path = "../kernel/crates/handl-language" }
+handl-value = { path = "../kernel/crates/handl-value" }
+# dev-link: end
