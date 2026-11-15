@@ -540,6 +540,7 @@ impl AttrKind {
 
 /// A parsed `cond` tree — `eval_cond`'s total predicate.
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // the shape predicates embed big specs; boxing churns every eval site
 pub enum Cond {
     /// A bare bool literal.
     Bool(bool),
@@ -556,6 +557,7 @@ pub enum Cond {
 /// The stage-1 predicate set — every `_OPS` entry that reads no
 /// shape. Shape-reading ops parse as [`GuardError::Unsupported`].
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // `Shape(ShapePred)` carries the whole predicate tree
 pub enum Pred {
     /// `("op-in", T, ops)` — kernel-Op head in the literal set.
     OpIn(TermRef, V),
@@ -595,6 +597,7 @@ pub enum Pred {
 /// resolved to [`crate::shape::ShapeSpec`]/[`crate::shape::AttrArg`]
 /// data. Evaluation delegates to [`crate::shape::pred`].
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // spec-carrying variants dominate; boxing is not worth it here
 pub enum ShapePred {
     /// `("shaped", T)`.
     Shaped(crate::shape::ShapeSpec),

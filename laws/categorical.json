@@ -1,0 +1,963 @@
+[
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Bilinearity: linear maps distribute over addition in BOTH slots.",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "b"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "add",
+          "source": "native"
+        },
+        {
+          "mvar": "W"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "matmul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "right_distribute_matmul",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "W"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "mvar": "b"
+            },
+            {
+              "mvar": "W"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "add",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "categorical",
+      "expansive"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Factor a shared right-weight (the slot `x @ W` uses).",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "W"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "mvar": "b"
+            },
+            {
+              "mvar": "W"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "add",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "right_factor_matmul",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "b"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "add",
+          "source": "native"
+        },
+        {
+          "mvar": "W"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "matmul",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "categorical",
+      "expansive"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Factor a shared right-hand nn.Linear weight.",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "W"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "linear",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "mvar": "b"
+            },
+            {
+              "mvar": "W"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "linear",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "add",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "right_factor_linear",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "b"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "add",
+          "source": "native"
+        },
+        {
+          "mvar": "W"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "linear",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "categorical",
+      "expansive"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Compose stacked nn.Linears: fused weight is B @ A (transposes flip the product order).",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "x"
+            },
+            {
+              "mvar": "A"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "linear",
+          "source": "native"
+        },
+        {
+          "mvar": "B"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "linear",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "assoc_linear",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "x"
+        },
+        {
+          "args": [
+            {
+              "mvar": "B"
+            },
+            {
+              "mvar": "A"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "linear",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "categorical",
+      "expansive"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Reverse linear composition: linear(x, B@A) = linear(linear(x, A), B) (eqsat weighs fused vs split).",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "x"
+        },
+        {
+          "args": [
+            {
+              "mvar": "B"
+            },
+            {
+              "mvar": "A"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "linear",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "assoc_linear_rev",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "x"
+            },
+            {
+              "mvar": "A"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "linear",
+          "source": "native"
+        },
+        {
+          "mvar": "B"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "linear",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "categorical",
+      "expansive"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Associativity of composition in a category: (f∘g)∘h = f∘(g∘h).",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "A"
+        },
+        {
+          "args": [
+            {
+              "mvar": "B"
+            },
+            {
+              "mvar": "C"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "matmul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "assoc_matmul",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "A"
+            },
+            {
+              "mvar": "B"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        },
+        {
+          "mvar": "C"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "matmul",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "categorical",
+      "expansive"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Reverse associativity: f∘(g∘h) = (f∘g)∘h.",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "A"
+            },
+            {
+              "mvar": "B"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        },
+        {
+          "mvar": "C"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "matmul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "assoc_matmul_rev",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "A"
+        },
+        {
+          "args": [
+            {
+              "mvar": "B"
+            },
+            {
+              "mvar": "C"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "matmul",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "matmul",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "categorical",
+      "expansive"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Triple pairing <q,k,v> : X -> V^3 — three projections of the same input are ONE GEMM into the product space, then three zero-cost chunk projections.  (Fused QKV.)",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "mvar": "x"
+                    },
+                    {
+                      "mvar": "Q"
+                    }
+                  ],
+                  "attrs": null,
+                  "dim": null,
+                  "lit": null,
+                  "op": "linear",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "bind": "S"
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "mvar": "x"
+                    },
+                    {
+                      "mvar": "K"
+                    }
+                  ],
+                  "attrs": null,
+                  "dim": null,
+                  "lit": null,
+                  "op": "linear",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "bind": "S"
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "mvar": "x"
+                    },
+                    {
+                      "mvar": "V"
+                    }
+                  ],
+                  "attrs": null,
+                  "dim": null,
+                  "lit": null,
+                  "op": "linear",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "bind": "S"
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        }
+      ],
+      "attrs": {
+        "bind": "SC"
+      },
+      "dim": null,
+      "lit": null,
+      "op": "sdpa",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "qkv_fuse",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "mvar": "x"
+                        },
+                        {
+                          "args": [
+                            {
+                              "args": [
+                                {
+                                  "mvar": "Q"
+                                },
+                                {
+                                  "mvar": "K"
+                                }
+                              ],
+                              "attrs": {
+                                "lit": {
+                                  "dim": 0
+                                }
+                              },
+                              "dim": null,
+                              "lit": null,
+                              "op": "concat",
+                              "source": "native"
+                            },
+                            {
+                              "mvar": "V"
+                            }
+                          ],
+                          "attrs": {
+                            "lit": {
+                              "dim": 0
+                            }
+                          },
+                          "dim": null,
+                          "lit": null,
+                          "op": "concat",
+                          "source": "native"
+                        }
+                      ],
+                      "attrs": null,
+                      "dim": null,
+                      "lit": null,
+                      "op": "linear",
+                      "source": "native"
+                    }
+                  ],
+                  "attrs": {
+                    "lit": {
+                      "chunks": 3,
+                      "dim": -1,
+                      "index": 0
+                    }
+                  },
+                  "dim": null,
+                  "lit": null,
+                  "op": "chunk",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "bind": "S"
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "mvar": "x"
+                        },
+                        {
+                          "args": [
+                            {
+                              "args": [
+                                {
+                                  "mvar": "Q"
+                                },
+                                {
+                                  "mvar": "K"
+                                }
+                              ],
+                              "attrs": {
+                                "lit": {
+                                  "dim": 0
+                                }
+                              },
+                              "dim": null,
+                              "lit": null,
+                              "op": "concat",
+                              "source": "native"
+                            },
+                            {
+                              "mvar": "V"
+                            }
+                          ],
+                          "attrs": {
+                            "lit": {
+                              "dim": 0
+                            }
+                          },
+                          "dim": null,
+                          "lit": null,
+                          "op": "concat",
+                          "source": "native"
+                        }
+                      ],
+                      "attrs": null,
+                      "dim": null,
+                      "lit": null,
+                      "op": "linear",
+                      "source": "native"
+                    }
+                  ],
+                  "attrs": {
+                    "lit": {
+                      "chunks": 3,
+                      "dim": -1,
+                      "index": 1
+                    }
+                  },
+                  "dim": null,
+                  "lit": null,
+                  "op": "chunk",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "bind": "S"
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "mvar": "x"
+                        },
+                        {
+                          "args": [
+                            {
+                              "args": [
+                                {
+                                  "mvar": "Q"
+                                },
+                                {
+                                  "mvar": "K"
+                                }
+                              ],
+                              "attrs": {
+                                "lit": {
+                                  "dim": 0
+                                }
+                              },
+                              "dim": null,
+                              "lit": null,
+                              "op": "concat",
+                              "source": "native"
+                            },
+                            {
+                              "mvar": "V"
+                            }
+                          ],
+                          "attrs": {
+                            "lit": {
+                              "dim": 0
+                            }
+                          },
+                          "dim": null,
+                          "lit": null,
+                          "op": "concat",
+                          "source": "native"
+                        }
+                      ],
+                      "attrs": null,
+                      "dim": null,
+                      "lit": null,
+                      "op": "linear",
+                      "source": "native"
+                    }
+                  ],
+                  "attrs": {
+                    "lit": {
+                      "chunks": 3,
+                      "dim": -1,
+                      "index": 2
+                    }
+                  },
+                  "dim": null,
+                  "lit": null,
+                  "op": "chunk",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "bind": "S"
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        }
+      ],
+      "attrs": {
+        "bind": "SC"
+      },
+      "dim": null,
+      "lit": null,
+      "op": "sdpa",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "fusion",
+      "subsumed"
+    ],
+    "version": 2
+  }
+]

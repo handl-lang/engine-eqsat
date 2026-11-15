@@ -593,13 +593,25 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     // stage-1 vocabulary end to end.
     assert_eq!(pa.compile().unwrap().len(), pa.laws().len());
 
+    // laws/categorical.json — the guard-free CATEGORICAL_RULES
+    // slice (matmul/linear algebra + qkv_fuse).
+    let cat = LawSet::from_json(include_str!("../laws/categorical.json")).unwrap();
+    assert_eq!(cat.laws(), builtin::categorical().as_slice());
+    assert_eq!(cat.compile().unwrap().len(), cat.laws().len());
+
+    // laws/pointwise_factor.json — the opt-in unguarded
+    // POINTWISE_FACTOR_RULES pair.
+    let pf = LawSet::from_json(include_str!("../laws/pointwise_factor.json")).unwrap();
+    assert_eq!(pf.laws(), builtin::pointwise_factor().as_slice());
+    assert_eq!(pf.compile().unwrap().len(), pf.laws().len());
+
     // laws/reshape_flatten_demo.json — the UNSOUND attrs-bind demo
     // (matcher coverage only; the `_demo` name is the warning).
     let flat = LawSet::from_json(include_str!("../laws/reshape_flatten_demo.json")).unwrap();
     assert_eq!(flat.laws(), &[builtin::reshape_flatten_demo()]);
 
     // And the records re-serialize byte-stably through the codec.
-    for set in [simpl, pa, flat] {
+    for set in [simpl, pa, cat, pf, flat] {
         let reloaded = LawSet::from_data(&set.to_data()).unwrap();
         assert_eq!(reloaded, set);
     }

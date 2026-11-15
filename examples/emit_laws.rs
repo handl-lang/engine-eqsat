@@ -7,6 +7,8 @@
 //! cargo run --example emit_laws -- simplification > laws/simplification.json
 //! cargo run --example emit_laws -- reshape_flatten_demo > laws/reshape_flatten_demo.json
 //! cargo run --example emit_laws -- prior_art > laws/prior_art.json
+//! cargo run --example emit_laws -- categorical > laws/categorical.json
+//! cargo run --example emit_laws -- pointwise_factor > laws/pointwise_factor.json
 //! ```
 //!
 //! Regenerate after changing [`hnl_engine_eqsat::builtin`] or the
@@ -19,6 +21,8 @@ fn main() {
     let pack = std::env::args().nth(1).unwrap_or_else(|| "all".to_string());
     let laws = match pack.as_str() {
         "simplification" => builtin::simplification(),
+        "categorical" => builtin::categorical(),
+        "pointwise_factor" => builtin::pointwise_factor(),
         "prior_art" => builtin::prior_art(),
         "reshape_flatten_demo" => vec![builtin::reshape_flatten_demo()],
         "all" => {
@@ -28,7 +32,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown pack {other:?} — expected simplification|prior_art|reshape_flatten_demo|all"
+                "unknown pack {other:?} — expected simplification|categorical|pointwise_factor|prior_art|reshape_flatten_demo|all"
             );
             std::process::exit(2);
         }
