@@ -2213,6 +2213,26 @@ fn tensor_wire_info(v: &Value) -> Option<TensorInfo> {
     })
 }
 
+/// The leaf's *declared* shape as concrete dims — the
+/// `("leaf-dim", T, i)` dspec read (`term.typ.shape` in `cond.py`):
+/// only a [`Term::Leaf`] whose payload declares a non-empty,
+/// all-int shape answers; `Op` bindings, shape-less leaves and
+/// `None`-dim declarations all decline. This is the *declared* read —
+/// never the inferred op shape — matching `_d_leaf_dim`'s strictness
+/// (an `Op` has no `.typ` and declines there too).
+pub(crate) fn leaf_declared_dims(t: &Term) -> Option<Vec<i64>> {
+    let Term::Leaf(key) = t else {
+        return None;
+    };
+    match leaf_info(key).shape {
+        Shape::Tuple(dims) => dims
+            .into_iter()
+            .collect::<Option<Vec<i64>>>()
+            .filter(|d| !d.is_empty()),
+        _ => None,
+    }
+}
+
 /// A JSON array of ints/nulls → dims (non-int elements → unknown
 /// extents, never a guess).
 fn json_dims(v: &Value) -> Option<Vec<Dim>> {
@@ -2605,18 +2625,23 @@ pub mod pred {
     //! `dim-eq`, `dim-compat`, `dim-eq-const`, `dim-eq-attr`,
     //! `dim-mod`, `bcast-into`, `mm-shape-ok`, `bcast-eq`,
     //! `ones-before`, `axes-last2`, `axes-distinct`, `axes-eq`,
-    //! `axes-noop`, `axis`, `attr-cmp-dim`, `attr-range`.
+    //! `axes-noop`, `axis`, `attr-cmp-dim`, `attr-range`, and the
+    //! flat-map/repeat pairing guards (`axis-align-eq`,
+    //! `bcast-dim-inv`, `flat-pair-unsq`, `flat-map-unsq`,
+    //! `repeat-chain`, `repeat-heads`) — the whole `cond.py` `_OPS`
+    //! table.
     //!
     //! The non-shape atoms, `and`/`or`/`not` combinators, and the
-    //! `dspec` expr algebra live in [`crate::guard`]. Still
-    //! unported: the flat/repeat pairing predicates
-    //! (`flat-pair-unsq`, `flat-map-unsq`, `repeat-chain`,
-    //! `repeat-heads`, `axis-align-eq`, `bcast-dim-inv`) — they
-    //! refuse as [`crate::guard::GuardError::Unsupported`].
+    //! `dspec` expr algebra live in [`crate::guard`]. The only
+    //! remaining unported channels are the tensor-value ones
+    //! (`tval`/`tapp` dspec exprs) — named refusals there.
 
-    use super::{AttrArg, Memo, Shape, ShapeSpec, av_int, matmul_shape, spec_shape_with};
+    use super::{
+        AttrArg, Memo, Shape, ShapeSpec, av_int, broadcast, matmul_shape, spec_shape_with,
+    };
     use handl_egraph::AttrValue;
     use handl_egraph::BoundEnv;
+    use std::collections::BTreeMap;
 
     /// `_tshape`: resolve a spec to a tuple shape or `None`.
     fn tshape(env: &BoundEnv, spec: &ShapeSpec, memo: &mut Memo) -> Option<Vec<Option<i64>>> {
@@ -3019,6 +3044,339 @@ pub mod pred {
             Some(Some(d)) if d >= 0 => ints == (0..d).collect::<Vec<_>>(),
             _ => false,
         }
+    }
+
+    // -----------------------------------------------------------------
+    //  The flat-map / repeat pairing guards — `_p_*` ports over
+    //  concrete int shapes. Every unprovable piece declines.
+    // -----------------------------------------------------------------
+
+    /// `_aval` → an int-tuple read for the repeat specs: an `Array`
+    /// attr whose elements read int-like (`Some`) or not (`None` —
+    /// a non-int element never equals a concrete dim, so the strict
+    /// comparisons below decline exactly where Python's `!=`/`==`
+    /// on mixed types would; float-vs-int numeric equality is the one
+    /// place this reads *stricter* than Python — a safe direction).
+    fn aval_elems(env: &BoundEnv, a: &AttrArg) -> Option<Vec<Option<i64>>> {
+        match a.resolve(env)? {
+            AttrValue::Array(items) => Some(items.iter().map(av_int).collect()),
+            _ => None,
+        }
+    }
+
+    /// `_concrete_specs`: every spec must resolve to an all-int tuple.
+    fn concrete_specs(
+        env: &BoundEnv,
+        specs: &[&ShapeSpec],
+        memo: &mut Memo,
+    ) -> Option<Vec<Vec<i64>>> {
+        specs
+            .iter()
+            .map(|s| {
+                let d = tshape(env, s, memo)?;
+                d.into_iter().collect::<Option<Vec<i64>>>()
+            })
+            .collect()
+    }
+
+    /// `_concrete_rank2`: rank ≥ 2, all dims concrete.
+    fn concrete_rank2(env: &BoundEnv, spec: &ShapeSpec, memo: &mut Memo) -> Option<Vec<i64>> {
+        let d = tshape(env, spec, memo)?;
+        if d.len() < 2 {
+            return None;
+        }
+        d.into_iter().collect()
+    }
+
+    /// `_unsq_shape` on a concrete int tuple: insert a 1 at
+    /// `k % (rank+1)`.
+    fn unsq_vec(shape: &[i64], k: i64) -> Vec<i64> {
+        let nd = k.rem_euclid(shape.len() as i64 + 1) as usize;
+        let mut out = shape[..nd].to_vec();
+        out.push(1);
+        out.extend_from_slice(&shape[nd..]);
+        out
+    }
+
+    /// `_stride`: flat-index stride of `shape[i]` — the product of
+    /// the trailing dims. `i128` with a checked product: an
+    /// overflow declines (never a wrapped stride that could
+    /// fabricate an equality).
+    fn stride(shape: &[i64], i: usize) -> Option<i128> {
+        shape[i + 1..]
+            .iter()
+            .try_fold(1i128, |acc, d| acc.checked_mul(i128::from(*d)))
+    }
+
+    /// Concrete-int broadcast of two dim tuples — `_broadcast`'s
+    /// int-only slice; `Invalid`/unknown results decline.
+    fn broadcast_ints(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
+        let ta = Shape::Tuple(a.iter().map(|d| Some(*d)).collect());
+        let tb = Shape::Tuple(b.iter().map(|d| Some(*d)).collect());
+        match broadcast(&ta, &tb) {
+            Shape::Tuple(d) => d.into_iter().collect(),
+            _ => None,
+        }
+    }
+
+    /// `_viewed_map`: flat-read coeff map of `src` broadcast into
+    /// `grid` — `{grid position: flat stride}` per non-1 dim.
+    fn viewed_map(src: &[i64], grid: &[i64]) -> Option<BTreeMap<i64, i128>> {
+        let off = grid.len() as i64 - src.len() as i64;
+        let mut out = BTreeMap::new();
+        for (j, &dj) in src.iter().enumerate() {
+            if dj != 1 {
+                out.insert(off + j as i64, stride(src, j)?);
+            }
+        }
+        Some(out)
+    }
+
+    /// `_shifted_map`: `src`'s coeff map through an axis insertion —
+    /// positions at or past `nd` read one slot further right.
+    fn shifted_map(src: &[i64], grid: &[i64], nd: i64) -> Option<BTreeMap<i64, i128>> {
+        let off = grid.len() as i64 - src.len() as i64;
+        let mut out = BTreeMap::new();
+        for (j, &dj) in src.iter().enumerate() {
+            if dj != 1 {
+                let p = off + j as i64;
+                out.insert(p + i64::from(p >= nd), stride(src, j)?);
+            }
+        }
+        Some(out)
+    }
+
+    /// `_flat_map_ok`: coeff maps agree at every grid position the
+    /// grid actually varies (`w[p] > 1`; size-1 positions read the
+    /// constant 0 either way).
+    fn flat_map_ok(lmap: &BTreeMap<i64, i128>, rmap: &BTreeMap<i64, i128>, w: &[i64]) -> bool {
+        w.iter().enumerate().all(|(p, &wd)| {
+            wd == 1
+                || lmap.get(&(p as i64)).copied().unwrap_or(0)
+                    == rmap.get(&(p as i64)).copied().unwrap_or(0)
+        })
+    }
+
+    /// `_repeat_merge_ok`: the chain's shape equation at the
+    /// normalized axis — expand is exactly the unsqueezed shape with
+    /// an int factor `r > 1` at `d`, reshape merges `d-1`/`d`.
+    fn repeat_merge_ok(bs: &[i64], d: i64, es: &[Option<i64>], rs: &[Option<i64>]) -> bool {
+        let nd = bs.len();
+        let d = d.rem_euclid(nd as i64 + 1);
+        let us = unsq_vec(bs, d);
+        if es.len() != us.len() || rs.len() != nd || d == 0 {
+            return false;
+        }
+        let d = d as usize;
+        let Some(r) = es[d] else {
+            return false; // `isinstance(r, int)`
+        };
+        if r <= 1 {
+            return false;
+        }
+        for (i, &u) in us.iter().enumerate() {
+            if i != d && es[i] != Some(u) {
+                return false;
+            }
+        }
+        // merged = us[..d-1] + (us[d-1]*r,) + us[d+1..]
+        let mut merged: Vec<i128> = us[..d - 1].iter().map(|&x| i128::from(x)).collect();
+        let Some(prod) = i128::from(us[d - 1]).checked_mul(i128::from(r)) else {
+            return false;
+        };
+        merged.push(prod);
+        merged.extend(us[d + 1..].iter().map(|&x| i128::from(x)));
+        rs.iter()
+            .zip(merged.iter())
+            .all(|(&e, &m)| e.map(i128::from) == Some(m))
+    }
+
+    /// `_rep_factor`: the expand factor at the normalized axis.
+    fn rep_factor(es: &[Option<i64>], d: i64, rank: usize) -> Option<i64> {
+        let dd = d.rem_euclid(rank as i64 + 1);
+        if dd as usize >= es.len() {
+            return None;
+        }
+        es[dd as usize]
+    }
+
+    /// `("axis-align-eq", A, B, K)` — `_p_axis_align_eq`: the bound
+    /// axis sits at the same right-aligned position in both shapes.
+    /// Only the ranks are read — dims need not be concrete.
+    pub fn axis_align_eq(env: &BoundEnv, a: &ShapeSpec, b: &ShapeSpec, k: &AttrArg) -> bool {
+        let mut memo = Memo::new();
+        let (Some(sa), Some(sb), Some(d)) = (
+            tshape(env, a, &mut memo),
+            tshape(env, b, &mut memo),
+            aval_int(env, k),
+        ) else {
+            return false;
+        };
+        if sa.is_empty() || sb.is_empty() {
+            return false;
+        }
+        d.rem_euclid(sa.len() as i64) - sa.len() as i64
+            == d.rem_euclid(sb.len() as i64) - sb.len() as i64
+    }
+
+    /// `("bcast-dim-inv", V, U, K)` — `_p_bcast_dim_inv`: `V`
+    /// right-aligns into `U`'s grid and is invariant (extent 1 or
+    /// absent) along `U`'s axis `K`.
+    pub fn bcast_dim_inv(env: &BoundEnv, v: &ShapeSpec, u: &ShapeSpec, k: &AttrArg) -> bool {
+        let mut memo = Memo::new();
+        let (Some(sv), Some(su), Some(d)) = (
+            tshape(env, v, &mut memo),
+            tshape(env, u, &mut memo),
+            aval_int(env, k),
+        ) else {
+            return false;
+        };
+        if su.is_empty() {
+            return false;
+        }
+        let pos = d.rem_euclid(su.len() as i64) - su.len() as i64 + sv.len() as i64;
+        if !(0..sv.len() as i64).contains(&pos) {
+            return true; // V has no such axis — broadcasts the constant
+        }
+        sv[pos as usize] == Some(1) // a None extent declines (not provably 1)
+    }
+
+    /// `("flat-pair-unsq", T, K, G, S)` — `_p_flat_pair_unsq`: the
+    /// *wr* naturality's u-side — `u`'s flat reads agree across
+    /// `unsq→S` vs `bcast→G`. All specs must be concrete ints.
+    pub fn flat_pair_unsq(
+        env: &BoundEnv,
+        t: &ShapeSpec,
+        k: &AttrArg,
+        g: &ShapeSpec,
+        s: &ShapeSpec,
+    ) -> bool {
+        let mut memo = Memo::new();
+        let (Some(k), Some(specs)) = (aval_int(env, k), concrete_specs(env, &[t, g, s], &mut memo))
+        else {
+            return false;
+        };
+        let mut it = specs.into_iter();
+        let (Some(su), Some(gr), Some(sh)) = (it.next(), it.next(), it.next()) else {
+            return false;
+        };
+        let (r, n, n2) = (su.len() as i64, gr.len() as i64, sh.len() as i64);
+        let nd = k.rem_euclid(r + 1) as usize;
+        for (kk, &suk) in su.iter().enumerate() {
+            if suk == 1 {
+                continue;
+            }
+            let j = if kk < nd { kk } else { kk + 1 };
+            let (p1, p2) = (n - r + kk as i64, n2 - (r + 1) + j as i64);
+            if !(0..n).contains(&p1) || !(0..n2).contains(&p2) {
+                return false;
+            }
+            let (p1, p2) = (p1 as usize, p2 as usize);
+            if gr[p1] != suk || sh[p2] != suk {
+                return false;
+            }
+            match (stride(&gr, p1), stride(&sh, p2)) {
+                (Some(a), Some(b)) if a == b => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// `("flat-map-unsq", T, K, V, S)` — `_p_flat_map_unsq`: the
+    /// *wl* naturality — `mul(unsq(u,K), reshape(v,S)) ==
+    /// unsq(mul(u,v), K)` at shape level: the output grids coincide
+    /// and both operands' flat-read coeff maps agree across the two
+    /// orders. All shapes must be concrete ints.
+    pub fn flat_map_unsq(
+        env: &BoundEnv,
+        t: &ShapeSpec,
+        k: &AttrArg,
+        v: &ShapeSpec,
+        s: &ShapeSpec,
+    ) -> bool {
+        let mut memo = Memo::new();
+        let (Some(k), Some(specs)) = (aval_int(env, k), concrete_specs(env, &[t, v, s], &mut memo))
+        else {
+            return false;
+        };
+        let mut it = specs.into_iter();
+        let (Some(su), Some(sv), Some(sh)) = (it.next(), it.next(), it.next()) else {
+            return false;
+        };
+        let su_p = unsq_vec(&su, k);
+        let (Some(gu), Some(gl)) = (broadcast_ints(&su, &sv), broadcast_ints(&su_p, &sh)) else {
+            return false;
+        };
+        let nd = k.rem_euclid(gu.len() as i64 + 1) as usize;
+        let mut w = gu[..nd].to_vec();
+        w.push(1);
+        w.extend_from_slice(&gu[nd..]);
+        if w != gl {
+            return false;
+        }
+        let nd = nd as i64;
+        let (Some(l1), Some(r1), Some(l2), Some(r2)) = (
+            viewed_map(&su_p, &w),
+            shifted_map(&su, &gu, nd),
+            viewed_map(&sh, &w),
+            shifted_map(&sv, &gu, nd),
+        ) else {
+            return false;
+        };
+        flat_map_ok(&l1, &r1, &w) && flat_map_ok(&l2, &r2, &w)
+    }
+
+    /// `("repeat-chain", T, UD, ES, RS)` — `_p_repeat_chain`: the
+    /// `unsqueeze → expand → reshape` copy-map chain is a
+    /// `repeat_interleave` on `T`'s dim `d-1`. `T` must be a concrete
+    /// tuple; `UD`/`ES`/`RS` resolve through `_aval`.
+    pub fn repeat_chain(
+        env: &BoundEnv,
+        t: &ShapeSpec,
+        ud: &AttrArg,
+        es: &AttrArg,
+        rs: &AttrArg,
+    ) -> bool {
+        let mut memo = Memo::new();
+        let (Some(d), Some(es), Some(rs), Some(bs)) = (
+            aval_int(env, ud),
+            aval_elems(env, es),
+            aval_elems(env, rs),
+            tshape(env, t, &mut memo),
+        ) else {
+            return false;
+        };
+        let Some(bs) = bs.into_iter().collect::<Option<Vec<i64>>>() else {
+            return false; // `any(x is None)` — a `None` dim declines
+        };
+        repeat_merge_ok(&bs, d, &es, &rs)
+    }
+
+    /// `("repeat-heads", A, B, UD, ES)` — `_p_repeat_heads`: the
+    /// repeated-head relation `sa[-2] == sb[-2] * r` where `r` is the
+    /// expand factor at the normalized unsqueeze axis. Both shapes
+    /// rank ≥ 2 and fully concrete.
+    pub fn repeat_heads(
+        env: &BoundEnv,
+        a: &ShapeSpec,
+        b: &ShapeSpec,
+        ud: &AttrArg,
+        es: &AttrArg,
+    ) -> bool {
+        let mut memo = Memo::new();
+        let (Some(sa), Some(sb), Some(d), Some(es)) = (
+            concrete_rank2(env, a, &mut memo),
+            concrete_rank2(env, b, &mut memo),
+            aval_int(env, ud),
+            aval_elems(env, es),
+        ) else {
+            return false;
+        };
+        let Some(r) = rep_factor(&es, d, sb.len()) else {
+            return false;
+        };
+        i128::from(sa[sa.len() - 2]) == i128::from(sb[sb.len() - 2]) * i128::from(r)
     }
 
     /// The six comparison spellings (`_CMPS` on ints).

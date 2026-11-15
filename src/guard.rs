@@ -58,7 +58,10 @@
 //! `bcast-eq`, `ones-before`, `axes-noop`, `attr-range`, and the
 //! `_SPEC_OPS` specs (`mm-out`/`bcast`/`unsq-out`/`reshape-out`/
 //! `getitem-out`/`select-out`/`slice-out`/`chunk-out`/
-//! `transpose-out`/`tail-block`/`isel-out`/`vshape`) — parsed into
+//! `transpose-out`/`tail-block`/`isel-out`/`vshape`) plus the
+//! flat-map/repeat pairing guards (`axis-align-eq`, `bcast-dim-inv`,
+//! `flat-pair-unsq`, `flat-map-unsq`, `repeat-chain`,
+//! `repeat-heads`) — the whole `cond.py` `_OPS` table — parsed into
 //! [`ShapePred`] and evaluated through [`crate::shape::pred`]. Attr
 //! positions accept the name/literal spellings; an inline derive
 //! *expr* inside a shape attr position is a named
@@ -67,24 +70,16 @@
 //!
 //! # Deliberately absent (named, never approximated)
 //!
-//! * The flat-map/repeat pairing guards: `axis-align-eq`,
-//!   `bcast-dim-inv`, `flat-pair-unsq`, `flat-map-unsq`,
-//!   `repeat-chain`, `repeat-heads` — they need the carrier-side
-//!   flat-map machinery, not landed here.
-//! * The shape-reading *exprs* `shape`, `vshape`, `dim`, `leaf-dim`,
-//!   `bcast` inside `dspec` — the derive channel's shape reads stay
-//!   [`GuardError::Unsupported`] (predicates cover the guard side;
-//!   derived shape bindings are a separate surface).
 //! * The tensor-value channels `tval`/`tapp` and the `$leaf:` tensor
 //!   mint — they need a registered [`TensorAlgebra`](cond.py)-equivalent
 //!   backend (kit/backend territory). `$leaf:` exprs evaluating to
 //!   scalars mint `Const` leaves exactly like `_mint_leaf`; anything
-//!   else declines.
-//! * The tensor-value channels `tval`/`tapp` and the `$leaf:` tensor
-//!   mint — they need a registered [`TensorAlgebra`](cond.py)-equivalent
-//!   backend (kit/backend territory). `$leaf:` exprs evaluating to
-//!   scalars mint `Const` leaves exactly like `_mint_leaf`; anything
-//!   else declines.
+//!   else declines. The shape-reading *exprs* `shape`, `vshape`,
+//!   `dim`, `leaf-dim`, `bcast` ARE ported (over
+//!   [`crate::shape`]'s inference and the leaf's declared-shape
+//!   payloads); `vshape` resolves through the same cost convention
+//!   as [`crate::shape::ShapeSpec::Vshape`] — there is no registered
+//!   carrier value-shape resolver on this side.
 //!
 //! # Documented divergences (all conservative)
 //!
@@ -700,6 +695,46 @@ pub enum ShapePred {
         crate::shape::ShapeSpec,
         crate::shape::AttrArg,
     ),
+    /// `("axis-align-eq", A, B, K)`.
+    AxisAlignEq(
+        crate::shape::ShapeSpec,
+        crate::shape::ShapeSpec,
+        crate::shape::AttrArg,
+    ),
+    /// `("bcast-dim-inv", V, U, K)`.
+    BcastDimInv(
+        crate::shape::ShapeSpec,
+        crate::shape::ShapeSpec,
+        crate::shape::AttrArg,
+    ),
+    /// `("flat-pair-unsq", T, K, G, S)`.
+    FlatPairUnsq(
+        crate::shape::ShapeSpec,
+        crate::shape::AttrArg,
+        crate::shape::ShapeSpec,
+        crate::shape::ShapeSpec,
+    ),
+    /// `("flat-map-unsq", T, K, V, S)`.
+    FlatMapUnsq(
+        crate::shape::ShapeSpec,
+        crate::shape::AttrArg,
+        crate::shape::ShapeSpec,
+        crate::shape::ShapeSpec,
+    ),
+    /// `("repeat-chain", T, UD, ES, RS)`.
+    RepeatChain(
+        crate::shape::ShapeSpec,
+        crate::shape::AttrArg,
+        crate::shape::AttrArg,
+        crate::shape::AttrArg,
+    ),
+    /// `("repeat-heads", A, B, UD, ES)`.
+    RepeatHeads(
+        crate::shape::ShapeSpec,
+        crate::shape::ShapeSpec,
+        crate::shape::AttrArg,
+        crate::shape::AttrArg,
+    ),
 }
 
 impl ShapePred {
@@ -734,6 +769,12 @@ impl ShapePred {
             ShapePred::Axis(t, name, k) => sp::axis(env, t, name, *k),
             ShapePred::AttrCmpDim(name, cmp, t, k) => sp::attr_cmp_dim(env, name, cmp.name(), t, k),
             ShapePred::AttrRange(v, t, k) => sp::attr_range(env, v, t, k),
+            ShapePred::AxisAlignEq(a, b, k) => sp::axis_align_eq(env, a, b, k),
+            ShapePred::BcastDimInv(v, u, k) => sp::bcast_dim_inv(env, v, u, k),
+            ShapePred::FlatPairUnsq(t, k, g, s) => sp::flat_pair_unsq(env, t, k, g, s),
+            ShapePred::FlatMapUnsq(t, k, v, s) => sp::flat_map_unsq(env, t, k, v, s),
+            ShapePred::RepeatChain(t, ud, es, rs) => sp::repeat_chain(env, t, ud, es, rs),
+            ShapePred::RepeatHeads(a, b, ud, es) => sp::repeat_heads(env, a, b, ud, es),
         }
     }
 }
@@ -946,6 +987,27 @@ pub enum Expr {
     Rsqrt(Box<Expr>),
     /// `("add"|"sub"|"mul"|"fdiv"|"floordiv", e, e)`.
     Bin(BinOp, Box<Expr>, Box<Expr>),
+    /// `("shape", spec)` — `_d_shape`: the inferred shape tuple;
+    /// `None` dims read as `null` elements. Declines on a non-tuple.
+    Shape(Box<crate::shape::ShapeSpec>),
+    /// `("vshape", spec)` — `_d_vshape`: the value-shape read.
+    /// `cond.py` resolves through the registered carrier resolver;
+    /// none exists on this side, so it resolves exactly as
+    /// [`Expr::Shape`] — the same convention [`crate::shape::ShapeSpec::Vshape`]
+    /// documents (never a fabricated carrier shape).
+    Vshape(Box<crate::shape::ShapeSpec>),
+    /// `("dim", spec, i)` — `_d_dim`: one concrete dim of the
+    /// inferred shape. `i` is a *raw* JSON position (not an eval'd
+    /// expr) — `None` stores a non-int literal, which declines at
+    /// eval exactly like Python's `isinstance(i, int)` gate.
+    Dim(Box<crate::shape::ShapeSpec>, Option<i64>),
+    /// `("leaf-dim", T, i)` — `_d_leaf_dim`: a dim of the bound
+    /// leaf's *declared* shape (`term.typ.shape` — never inferred).
+    /// `i` is a raw JSON position like [`Expr::Dim`]'s.
+    LeafDim(TermRef, Option<i64>),
+    /// `("bcast", a, b)` — `_d_bcast`: broadcast of two shape specs;
+    /// the result must be all-int or the derive vetoes.
+    Bcast(Box<crate::shape::ShapeSpec>, Box<crate::shape::ShapeSpec>),
 }
 
 /// The `_DBINOPS`/`_DUNOPS` arithmetic ops.
@@ -1033,16 +1095,45 @@ impl Expr {
                         Ok(())
                     }
                 };
-                // Stage-3 channels — named refusals, not approximations.
-                if matches!(
-                    op,
-                    "shape" | "vshape" | "dim" | "leaf-dim" | "bcast" | "tval" | "tapp"
-                ) {
+                // Stage-3 tensor channels — named refusals, not
+                // approximations. (`shape`/`vshape`/`dim`/`leaf-dim`/
+                // `bcast` are ported below over `crate::shape`.)
+                if matches!(op, "tval" | "tapp") {
                     return Err(GuardError::Unsupported(format!(
-                        "{op}: not ported — the dspec shape/tensor channels need a tensor backend"
+                        "{op}: not ported — the tensor-value dspec channels need a tensor backend"
                     )));
                 }
                 match op {
+                    "shape" | "vshape" => {
+                        need(1)?;
+                        let spec = Box::new(shape_spec_from_data(&args[0])?);
+                        Ok(if op == "shape" {
+                            Expr::Shape(spec)
+                        } else {
+                            Expr::Vshape(spec)
+                        })
+                    }
+                    "dim" => {
+                        need(2)?;
+                        Ok(Expr::Dim(
+                            Box::new(shape_spec_from_data(&args[0])?),
+                            raw_int(&args[1]),
+                        ))
+                    }
+                    "leaf-dim" => {
+                        need(2)?;
+                        Ok(Expr::LeafDim(
+                            term_ref_from_data(&args[0]),
+                            raw_int(&args[1]),
+                        ))
+                    }
+                    "bcast" => {
+                        need(2)?;
+                        Ok(Expr::Bcast(
+                            Box::new(shape_spec_from_data(&args[0])?),
+                            Box::new(shape_spec_from_data(&args[1])?),
+                        ))
+                    }
                     "lit" => {
                         need(1)?;
                         Ok(Expr::LitWrap(V::from_json(&args[0])))
@@ -1434,6 +1525,73 @@ impl Expr {
                 Some(V::Float(1.0 / n.f64().sqrt()))
             }
             Expr::Bin(op, a, b) => binop(*op, a.eval(env)?, b.eval(env)?),
+            Expr::Shape(spec) | Expr::Vshape(spec) => {
+                // `_d_shape`/`_d_vshape`: tuple-or-decline; `None`
+                // dims serialize as `null` elements.
+                match crate::shape::spec_shape(env, spec) {
+                    crate::shape::Shape::Tuple(dims) => Some(V::Seq(
+                        dims.iter()
+                            .map(|d| match d {
+                                Some(n) => V::Int(*n),
+                                None => V::Null,
+                            })
+                            .collect::<Vec<_>>()
+                            .into(),
+                    )),
+                    _ => None,
+                }
+            }
+            Expr::Dim(spec, i) => {
+                // `_d_dim`: `_tshape` + `_dim_at` + concrete dim.
+                let Some(i) = i else {
+                    return None; // non-int index — the isinstance gate
+                };
+                let s = crate::shape::spec_shape(env, spec);
+                let dims = s.as_tuple()?;
+                let n = dims.len() as i64;
+                if n == 0 || !(-n..n).contains(i) {
+                    return None;
+                }
+                dims[i.rem_euclid(n) as usize].map(V::Int)
+            }
+            Expr::LeafDim(t, i) => {
+                // `_d_leaf_dim`: the bound leaf's *declared* shape —
+                // `bound.get(name)`, never a spec resolution.
+                let (Some(term), Some(i)) = (t.term(env), i) else {
+                    return None;
+                };
+                let dims = crate::shape::leaf_declared_dims(term)?;
+                let n = dims.len() as i64;
+                if !(-n..n).contains(i) {
+                    return None;
+                }
+                Some(V::Int(dims[i.rem_euclid(n) as usize]))
+            }
+            Expr::Bcast(a, b) => {
+                // `_d_bcast`: non-tuple operands read the `None`
+                // wildcard (both `Unknown` and `Invalid` — Python's
+                // `_INVALID` marker is not a tuple either); the
+                // result must be all-int.
+                let wildcard = |s: crate::shape::Shape| match s {
+                    crate::shape::Shape::Tuple(d) => crate::shape::Shape::Tuple(d),
+                    _ => crate::shape::Shape::Unknown,
+                };
+                let out = crate::shape::broadcast(
+                    &wildcard(crate::shape::spec_shape(env, a)),
+                    &wildcard(crate::shape::spec_shape(env, b)),
+                );
+                match out {
+                    crate::shape::Shape::Tuple(dims) if dims.iter().all(|d| d.is_some()) => {
+                        Some(V::Seq(
+                            dims.iter()
+                                .map(|d| V::Int(d.unwrap_or(0)))
+                                .collect::<Vec<_>>()
+                                .into(),
+                        ))
+                    }
+                    _ => None,
+                }
+            }
         }
     }
 }
@@ -1590,25 +1748,25 @@ fn term_ref_from_data(value: &Value) -> TermRef {
     }
 }
 
+/// A *raw* JSON int position — `_d_dim`/`_d_leaf_dim`'s `args[1]`
+/// read: `isinstance(i, int)` admits bool; anything else stores
+/// `None` and the eval declines (the Python gate is a fire-time
+/// check, not a parse refusal).
+fn raw_int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok())),
+        Value::Bool(b) => Some(i64::from(*b)),
+        _ => None,
+    }
+}
+
 /// Fetch `args[i]` or report malformed (Python would `IndexError`).
 fn arg<'a>(args: &'a [Value], i: usize, whole: &Value) -> Result<&'a Value, GuardError> {
     args.get(i)
         .ok_or_else(|| GuardError::Malformed(format!("{whole}")))
 }
-
-/// Stage-3 predicate names still refused — the `_OPS` entries that
-/// read shapes through machinery this port does not cover: the
-/// flat-map/repeat pairing guards (`axis-align-eq`, `bcast-dim-inv`,
-/// `flat-pair-unsq`, `flat-map-unsq`, `repeat-chain`, `repeat-heads`).
-/// Named so the refusal says *why*.
-const SHAPE_PREDS_UNPORTED: &[&str] = &[
-    "axis-align-eq",
-    "bcast-dim-inv",
-    "flat-pair-unsq",
-    "flat-map-unsq",
-    "repeat-chain",
-    "repeat-heads",
-];
 
 /// A strict int literal for the shape predicates' `i`/`j`/`k`/`m`/`r`
 /// positions — Python's handlers `isinstance`-check these and
@@ -1741,11 +1899,6 @@ fn pred_from_data(op: &str, args: &[Value]) -> Result<Pred, GuardError> {
             .chain(args.iter().cloned())
             .collect(),
     );
-    if SHAPE_PREDS_UNPORTED.contains(&op) {
-        return Err(GuardError::Unsupported(format!(
-            "{op}: needs the flat-map/repeat guard machinery (not ported)"
-        )));
-    }
     let aval = |i: usize| aval_from_data(arg(args, i, &whole)?);
     let tref =
         |i: usize| -> Result<TermRef, GuardError> { Ok(term_ref_from_data(arg(args, i, &whole)?)) };
@@ -1840,6 +1993,41 @@ fn pred_from_data(op: &str, args: &[Value]) -> Result<Pred, GuardError> {
             sattr(0)?,
             spec(1)?,
             sattr(2)?,
+        ))),
+        // The flat-map / repeat pairing guards — `_OPS`' last six.
+        "axis-align-eq" => Ok(Pred::Shape(ShapePred::AxisAlignEq(
+            spec(0)?,
+            spec(1)?,
+            sattr(2)?,
+        ))),
+        "bcast-dim-inv" => Ok(Pred::Shape(ShapePred::BcastDimInv(
+            spec(0)?,
+            spec(1)?,
+            sattr(2)?,
+        ))),
+        "flat-pair-unsq" => Ok(Pred::Shape(ShapePred::FlatPairUnsq(
+            spec(0)?,
+            sattr(1)?,
+            spec(2)?,
+            spec(3)?,
+        ))),
+        "flat-map-unsq" => Ok(Pred::Shape(ShapePred::FlatMapUnsq(
+            spec(0)?,
+            sattr(1)?,
+            spec(2)?,
+            spec(3)?,
+        ))),
+        "repeat-chain" => Ok(Pred::Shape(ShapePred::RepeatChain(
+            spec(0)?,
+            sattr(1)?,
+            sattr(2)?,
+            sattr(3)?,
+        ))),
+        "repeat-heads" => Ok(Pred::Shape(ShapePred::RepeatHeads(
+            spec(0)?,
+            spec(1)?,
+            sattr(2)?,
+            sattr(3)?,
         ))),
         "op-in" => {
             // ops is a literal container — Seq elements, Str
@@ -2065,9 +2253,9 @@ mod tests {
                 "{bad}"
             );
         }
-        // The unported flat-map/repeat guards refuse as unsupported,
-        // named — the ported shape preds (`shaped`, `rank-eq`, …)
-        // parse into `Pred::Shape` and evaluate at fire time.
+        // The flat-map/repeat pairing guards are ported — they parse
+        // into `Pred::Shape` and decline on an empty env (no bound
+        // shapes). Bad arities still refuse as malformed.
         for bad in [
             json!(["flat-pair-unsq", "x"]),
             json!(["axis-align-eq", "a", "b"]),
@@ -2075,9 +2263,20 @@ mod tests {
             json!(["repeat-heads", "x"]),
         ] {
             assert!(
-                matches!(Cond::from_data(&bad), Err(GuardError::Unsupported(_))),
+                matches!(Cond::from_data(&bad), Err(GuardError::Malformed(_))),
                 "{bad}"
             );
+        }
+        for ok in [
+            json!(["flat-pair-unsq", "t", "K", "g", "s"]),
+            json!(["axis-align-eq", "a", "b", "K"]),
+            json!(["bcast-dim-inv", "v", "u", "K"]),
+            json!(["flat-map-unsq", "t", "K", "v", "s"]),
+            json!(["repeat-chain", "t", "UD", "ES", "RS"]),
+            json!(["repeat-heads", "a", "b", "UD", "ES"]),
+        ] {
+            let c = Cond::from_data(&ok).unwrap();
+            assert!(!c.eval(&env(&[], &[])), "{ok} declines empty");
         }
         // and/or/not combinators.
         let e = env(&[], &[]);
@@ -2471,12 +2670,10 @@ mod tests {
                 "{bad}"
             );
         }
-        // Stage-3 exprs refuse as unsupported.
-        for bad in [
-            json!({"X": ["shape", "u"]}),
-            json!({"X": ["dim", "u", 0]}),
-            json!({"X": ["bcast", "u"]}),
-        ] {
+        // The tensor-value exprs still refuse as unsupported; the
+        // shape-reading exprs are ported and decline on unbound
+        // specs at eval.
+        for bad in [json!({"X": ["tval", "u"]}), json!({"X": ["tapp", "f", 1]})] {
             assert!(
                 matches!(Dspec::from_data(&bad), Err(GuardError::Unsupported(_))),
                 "{bad}"
@@ -2487,5 +2684,49 @@ mod tests {
             Dspec::from_data(&json!({"X": ["bogus", 1]})),
             Err(GuardError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn shape_exprs_read_inferred_and_declared_shapes() {
+        // Unbound specs decline across the whole shape-expr family.
+        let e = env(&[], &[]);
+        for v in [
+            json!(["shape", "u"]),
+            json!(["vshape", "u"]),
+            json!(["dim", "u", 0]),
+            json!(["leaf-dim", "u", 0]),
+            json!(["bcast", "u", "v"]),
+        ] {
+            assert_eq!(eval_expr(v, &e), None);
+        }
+        // `leaf-dim` reads the leaf's *declared* shape — the
+        // `{"__tensor__": {"shape": …}}` wire payload — never an
+        // inferred op shape.
+        let leaf = konst(json!({"__tensor__": {"shape": [2, 3]}}));
+        let e2 = env(&[("Q", leaf)], &[]);
+        assert_eq!(eval_expr(json!(["leaf-dim", "Q", 0]), &e2), Some(V::Int(2)));
+        assert_eq!(
+            eval_expr(json!(["leaf-dim", "Q", -1]), &e2),
+            Some(V::Int(3))
+        );
+        assert_eq!(eval_expr(json!(["leaf-dim", "Q", 2]), &e2), None);
+        // A non-int index position declines at eval (the raw
+        // `isinstance(i, int)` gate), not at parse.
+        assert_eq!(eval_expr(json!(["leaf-dim", "Q", "x"]), &e2), None);
+        // `shape` on a scalar Const leaf is `()`; `dim` out of range
+        // declines; `bcast` against an unshaped side wildcards then
+        // declines on the non-tuple result.
+        let e3 = env(&[("c", konst(json!(4)))], &[]);
+        assert_eq!(
+            eval_expr(json!(["shape", "c"]), &e3),
+            Some(V::Seq(Rc::from(vec![])))
+        );
+        assert_eq!(eval_expr(json!(["dim", "c", 0]), &e3), None);
+        // `bcast` wildcards the unshaped side: `() ⊔ unknown = ()`,
+        // all-int vacuously — the empty tuple, exactly like Python.
+        assert_eq!(
+            eval_expr(json!(["bcast", "c", "missing"]), &e3),
+            Some(V::Seq(Rc::from(vec![])))
+        );
     }
 }

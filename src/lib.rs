@@ -22,7 +22,7 @@
 //! author must know (dim rides child slot 0, attr matching is
 //! exact-keyset, `Const` leaves are JSON-valued).
 //!
-//! ## The P2 contracts (stages 1–3, ADR-0177)
+//! ## The P2 contracts (stages 1–4, ADR-0177)
 //!
 //! * **Law records** — [`law::Law::to_data`]/[`law::Law::from_data`]
 //!   and [`lawset::LawSet::from_json`] implement the `LAW_FORMAT = 2`
@@ -31,14 +31,19 @@
 //!   [`guard`] — the `cond.py` port over `handl_egraph::BoundEnv`
 //!   (attr/scalar predicates, derive exprs, `with_check`/
 //!   `with_derive` wiring) — dispatching shape-reading atoms to
-//!   [`shape::pred`]. The flat-map/repeat pairing guards
-//!   (`flat-pair-unsq`, `repeat-chain`, …) and the tensor channels
-//!   (`tval`/`tapp`, tensor `$leaf:` mints) remain unported and
-//!   refuse by name ([`engine::Error::GuardUnsupported`]).
-//!   `serializable: false` / `missing_hooks` refuse with
+//!   [`shape::pred`]. Stage 4 ported the flat-map/repeat pairing
+//!   guards (`axis-align-eq`, `bcast-dim-inv`, `flat-pair-unsq`,
+//!   `flat-map-unsq`, `repeat-chain`, `repeat-heads`) and the
+//!   shape-reading dspec channels (`shape`, `vshape`, `dim`,
+//!   `leaf-dim`, `bcast`). The tensor channels (`tval`/`tapp`,
+//!   tensor `$leaf:` mints) and procedural `check`/`derive` hooks
+//!   remain unported and refuse by name
+//!   ([`engine::Error::GuardUnsupported`]/
 //!   [`engine::Error::UnserializableLaw`] — the `missing_hooks`
-//!   honesty posture, never a silent drop. The reference corpus
-//!   lives in `laws/*.json`.
+//!   honesty posture, never a silent drop). The reference corpus
+//!   lives in `laws/*.json`, including `prim_folds.json` — the 60
+//!   minted `prim:synop*` fold records as data (their synthetic-op
+//!   denotations stay domain-side; no builtin pack carries them).
 //! * **Shape inference** — [`shape`] ports `mlopt_core.typing`'s
 //!   `_shape_of`/`_broadcast`/`_matmul_shape`/`_numel` over the
 //!   bridge encoding (design doc §2 stage 2): `Shape::Tuple` with
@@ -91,13 +96,17 @@
 //!
 //! ## What is deliberately absent
 //!
-//! * **Flat-map/repeat guards + tensor channels.** The
-//!   `cond.py`/`dspec` machinery that pairs flattened axes
-//!   (`flat-pair-unsq`, `flat-map-unsq`, `repeat-chain`,
-//!   `repeat-heads`, `axis-align-eq`, `bcast-dim-inv`) and the
-//!   tensor-value channels (`tval`/`tapp`, tensor `$leaf:` mints)
-//!   are not ported — they refuse by name at compile
-//!   ([`engine::Error::GuardUnsupported`]), never approximated.
+//! * **Tensor-value channels + procedural hooks.** The `cond.py`/
+//!   `dspec` machinery that reads tensor *values* (`tval`/`tapp`,
+//!   tensor `$leaf:` mints) and the Python laws' procedural
+//!   `check`/`derive` hooks (`conv_bn_fold`'s `missing_hooks`, the
+//!   minted records' `.expand` premises) are not ported — they
+//!   refuse by name at compile
+//!   ([`engine::Error::GuardUnsupported`]/
+//!   [`engine::Error::UnserializableLaw`]), never approximated.
+//!   `prim:synop*` folds ship as `laws/prim_folds.json` data only:
+//!   their synthetic operator denotations are domain-side and a
+//!   consumer must register them before the records can fire.
 //! * **Backend-profiled cost models.** Roofline/fusion/executor
 //!   costs are backend algorithms, not tables — they stay
 //!   Python-side until a `CostSpec` kind with a `backend` profile

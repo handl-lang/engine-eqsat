@@ -183,23 +183,30 @@ fn guarded_records_round_trip_and_interpret() {
     assert_eq!(back.dspec, law.dspec);
     assert!(back.compile().is_ok());
 
-    // An unported flat-map/repeat guard refuses by name — never approximated.
+    // The tensor-value dspec channels still refuse by name — never approximated.
     let mut law3 = builtin::id_add();
-    law3.cond = Some(json!(["flat-pair-unsq", "x"]));
+    law3.dspec = Some(json!({"X": ["tval", "u"]}));
     assert!(matches!(
         law3.compile(),
         Err(LawError::GuardUnsupported { .. })
     ));
 
-    // A malformed node refuses as malformed, not unsupported.
+    // A malformed node refuses as malformed, not unsupported —
+    // including a wrong-arity flat-pair-unsq (now a ported guard).
     let mut law4 = builtin::id_add();
     law4.cond = Some(json!(["leaf"])); // missing the term arg
     assert!(matches!(
         law4.compile(),
         Err(LawError::GuardMalformed { .. })
     ));
+    let mut law4b = builtin::id_add();
+    law4b.cond = Some(json!(["flat-pair-unsq", "x"]));
+    assert!(matches!(
+        law4b.compile(),
+        Err(LawError::GuardMalformed { .. })
+    ));
     let mut law5 = builtin::id_add();
-    law5.dspec = Some(json!({"X": ["shape", "u"]})); // stage-3 expr
+    law5.dspec = Some(json!({"X": ["tapp", "f", 1]})); // tensor apply
     assert!(matches!(
         law5.compile(),
         Err(LawError::GuardUnsupported { .. })
@@ -235,7 +242,7 @@ fn engine_names_the_record_refusals() {
     // wrapped LawError.
     let guarded = {
         let mut l = builtin::id_add();
-        l.cond = Some(json!(["flat-pair-unsq", "x"]));
+        l.dspec = Some(json!({"X": ["tval", "u"]}));
         l
     };
     let input = native_op("add", vec![kconst(json!(1)), kconst(json!(0))]);
@@ -360,7 +367,7 @@ fn lawset_compile_collects_rules_and_refuses_sets() {
     assert_eq!(rules[0].name.as_ref(), "id_add");
 
     let mut guarded = builtin::id_mul();
-    guarded.cond = Some(json!(["flat-pair-unsq", "x"]));
+    guarded.dspec = Some(json!({"X": ["tapp", "f", 1]}));
     let bad = LawSet::from_laws(vec![guarded]);
     assert!(matches!(
         bad.compile(),
@@ -605,9 +612,9 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     assert_eq!(pf.laws(), builtin::pointwise_factor().as_slice());
     assert_eq!(pf.compile().unwrap().len(), pf.laws().len());
 
-    // laws/attention.json — the opt-in scaled slice of
-    // SDPA_EXPAND_RULES (the scale-free key-sets need the unported
-    // `dim` dspec channel and stay out).
+    // laws/attention.json — the full SDPA_EXPAND_RULES opt-in pack
+    // (stage 4 ported the `dim` dspec channel the scale-free
+    // key-sets mint `1/√(q[-1])` through).
     let att = LawSet::from_json(include_str!("../laws/attention.json")).unwrap();
     assert_eq!(att.laws(), builtin::attention().as_slice());
     assert_eq!(att.compile().unwrap().len(), att.laws().len());

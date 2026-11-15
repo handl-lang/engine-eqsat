@@ -1382,6 +1382,108 @@
     "bound_norm": "spectral",
     "cert": null,
     "cond": [
+      "flat-map-unsq",
+      "u",
+      "UD",
+      "v",
+      [
+        "unsq-out",
+        "v",
+        "UD"
+      ]
+    ],
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "unsqueeze(u, d) · unsqueeze(v, d) = unsqueeze(u · v, d) — elementwise mul commutes with a shared size-1 axis insertion exactly when the broadcast grids coincide AND both operands' flat-read maps agree across the two orders (the flat-map-unsq region — equal ranks always qualify; unequal ranks only when the insert lands in the pad).  Fuses two views into one and shrinks the pointwise domain a rank.",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "u"
+            }
+          ],
+          "attrs": {
+            "fields": {
+              "dim": {
+                "bind": "UD"
+              }
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "unsqueeze",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "mvar": "v"
+            }
+          ],
+          "attrs": {
+            "fields": {
+              "dim": {
+                "bind": "UD"
+              }
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "unsqueeze",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "mul_unsq_nat",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "u"
+            },
+            {
+              "mvar": "v"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "mul",
+          "source": "native"
+        }
+      ],
+      "attrs": {
+        "fields": {
+          "dim": {
+            "bind": "UD"
+          }
+        }
+      },
+      "dim": null,
+      "lit": null,
+      "op": "unsqueeze",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": [
       "bcast-eq",
       [
         "reshape-out",
@@ -1678,6 +1780,318 @@
       "dim": null,
       "lit": null,
       "op": "glu",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": [
+      "and",
+      [
+        "and",
+        [
+          "attr-is",
+          "MK",
+          true
+        ],
+        [
+          "const-num",
+          "EPS"
+        ],
+        [
+          "const-cmp",
+          "P",
+          "==",
+          2
+        ]
+      ],
+      [
+        "shape-eq",
+        "w",
+        [
+          "tail-block",
+          "u",
+          "MD"
+        ]
+      ]
+    ],
+    "derivation": [],
+    "dspec": {
+      "EP": [
+        "float",
+        [
+          "const",
+          "EPS"
+        ]
+      ],
+      "ND": [
+        "shape",
+        [
+          "tail-block",
+          "u",
+          "MD"
+        ]
+      ]
+    },
+    "error_bound": null,
+    "kind": "law",
+    "law": "x·rsqrt(mean(x²)+eps)·w IS rms_norm(x, w): the manual-RMSNorm fold — composed-then-reduced then scaled IS the kernel's definition.  Folds mul+mul+rsqrt+add+mean+pow to one dispatched op.",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "u"
+            },
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "args": [
+                            {
+                              "mvar": "u"
+                            },
+                            {
+                              "mvar": "P"
+                            }
+                          ],
+                          "attrs": null,
+                          "dim": null,
+                          "lit": null,
+                          "op": "pow",
+                          "source": "native"
+                        }
+                      ],
+                      "attrs": {
+                        "fields": {
+                          "dim": {
+                            "bind": "MD"
+                          },
+                          "keepdim": {
+                            "bind": "MK"
+                          }
+                        }
+                      },
+                      "dim": null,
+                      "lit": null,
+                      "op": "mean",
+                      "source": "native"
+                    },
+                    {
+                      "mvar": "EPS"
+                    }
+                  ],
+                  "attrs": null,
+                  "dim": null,
+                  "lit": null,
+                  "op": "add",
+                  "source": "native"
+                }
+              ],
+              "attrs": null,
+              "dim": null,
+              "lit": null,
+              "op": "rsqrt",
+              "source": "native"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "mul",
+          "source": "native"
+        },
+        {
+          "mvar": "w"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "rms_norm_fold",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "u"
+        },
+        {
+          "mvar": "w"
+        }
+      ],
+      "attrs": {
+        "fields": {
+          "dim": {
+            "bind": "ND"
+          },
+          "eps": {
+            "bind": "EP"
+          }
+        }
+      },
+      "dim": null,
+      "lit": null,
+      "op": "rms_norm",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": [
+      "and",
+      [
+        "and",
+        [
+          "attr-is",
+          "MK",
+          true
+        ],
+        [
+          "const-num",
+          "EPS"
+        ],
+        [
+          "const-cmp",
+          "P",
+          "==",
+          2
+        ]
+      ],
+      [
+        "shaped",
+        [
+          "tail-block",
+          "u",
+          "MD"
+        ]
+      ]
+    ],
+    "derivation": [],
+    "dspec": {
+      "EP": [
+        "float",
+        [
+          "const",
+          "EPS"
+        ]
+      ],
+      "ND": [
+        "shape",
+        [
+          "tail-block",
+          "u",
+          "MD"
+        ]
+      ]
+    },
+    "error_bound": null,
+    "kind": "law",
+    "law": "x·rsqrt(mean(x²)+eps) IS rms_norm(x): the weight-free manual-RMSNorm fold — the gained fold's inner ``mul`` and a real spelling of its own (gain-free RMSNorm blocks).",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "u"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "mvar": "u"
+                        },
+                        {
+                          "mvar": "P"
+                        }
+                      ],
+                      "attrs": null,
+                      "dim": null,
+                      "lit": null,
+                      "op": "pow",
+                      "source": "native"
+                    }
+                  ],
+                  "attrs": {
+                    "fields": {
+                      "dim": {
+                        "bind": "MD"
+                      },
+                      "keepdim": {
+                        "bind": "MK"
+                      }
+                    }
+                  },
+                  "dim": null,
+                  "lit": null,
+                  "op": "mean",
+                  "source": "native"
+                },
+                {
+                  "mvar": "EPS"
+                }
+              ],
+              "attrs": null,
+              "dim": null,
+              "lit": null,
+              "op": "add",
+              "source": "native"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "rsqrt",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "rms_norm_fold_nogain",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "u"
+        }
+      ],
+      "attrs": {
+        "fields": {
+          "dim": {
+            "bind": "ND"
+          },
+          "eps": {
+            "bind": "EP"
+          }
+        }
+      },
+      "dim": null,
+      "lit": null,
+      "op": "rms_norm",
       "source": "native"
     },
     "serializable": true,

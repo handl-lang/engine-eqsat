@@ -3371,6 +3371,502 @@
   {
     "bound_norm": "spectral",
     "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": {
+      "SZ": [
+        "tuple",
+        [
+          "leaf-dim",
+          "Q",
+          0
+        ],
+        [
+          "leaf-dim",
+          "K",
+          0
+        ],
+        [
+          "leaf-dim",
+          "V",
+          0
+        ]
+      ]
+    },
+    "error_bound": null,
+    "kind": "law",
+    "law": "Asymmetric triple pairing: the same product law as qkv_fuse, but the three projections have different output dims — one GEMM, three uneven split views.  (GQA fused QKV.)",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "mvar": "x"
+                    },
+                    {
+                      "mvar": "Q"
+                    }
+                  ],
+                  "attrs": null,
+                  "dim": null,
+                  "lit": null,
+                  "op": "linear",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "fields": {
+                  "shape": {
+                    "bind": "S1"
+                  }
+                }
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "mvar": "x"
+                    },
+                    {
+                      "mvar": "K"
+                    }
+                  ],
+                  "attrs": null,
+                  "dim": null,
+                  "lit": null,
+                  "op": "linear",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "fields": {
+                  "shape": {
+                    "bind": "S2"
+                  }
+                }
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "mvar": "x"
+                    },
+                    {
+                      "mvar": "V"
+                    }
+                  ],
+                  "attrs": null,
+                  "dim": null,
+                  "lit": null,
+                  "op": "linear",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "fields": {
+                  "shape": {
+                    "bind": "S3"
+                  }
+                }
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        }
+      ],
+      "attrs": {
+        "fields": {
+          "enable_gqa": {
+            "bind": "G"
+          },
+          "scale": {
+            "bind": "SC"
+          }
+        }
+      },
+      "dim": null,
+      "lit": null,
+      "op": "sdpa",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "qkv_fuse_asym",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "mvar": "x"
+                        },
+                        {
+                          "args": [
+                            {
+                              "args": [
+                                {
+                                  "mvar": "Q"
+                                },
+                                {
+                                  "mvar": "K"
+                                }
+                              ],
+                              "attrs": {
+                                "lit": {
+                                  "dim": 0
+                                }
+                              },
+                              "dim": null,
+                              "lit": null,
+                              "op": "concat",
+                              "source": "native"
+                            },
+                            {
+                              "mvar": "V"
+                            }
+                          ],
+                          "attrs": {
+                            "lit": {
+                              "dim": 0
+                            }
+                          },
+                          "dim": null,
+                          "lit": null,
+                          "op": "concat",
+                          "source": "native"
+                        }
+                      ],
+                      "attrs": null,
+                      "dim": null,
+                      "lit": null,
+                      "op": "linear",
+                      "source": "native"
+                    }
+                  ],
+                  "attrs": {
+                    "fields": {
+                      "dim": {
+                        "lit": -1
+                      },
+                      "index": {
+                        "lit": 0
+                      },
+                      "sizes": {
+                        "bind": "SZ"
+                      }
+                    }
+                  },
+                  "dim": null,
+                  "lit": null,
+                  "op": "split",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "fields": {
+                  "shape": {
+                    "bind": "S1"
+                  }
+                }
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "mvar": "x"
+                        },
+                        {
+                          "args": [
+                            {
+                              "args": [
+                                {
+                                  "mvar": "Q"
+                                },
+                                {
+                                  "mvar": "K"
+                                }
+                              ],
+                              "attrs": {
+                                "lit": {
+                                  "dim": 0
+                                }
+                              },
+                              "dim": null,
+                              "lit": null,
+                              "op": "concat",
+                              "source": "native"
+                            },
+                            {
+                              "mvar": "V"
+                            }
+                          ],
+                          "attrs": {
+                            "lit": {
+                              "dim": 0
+                            }
+                          },
+                          "dim": null,
+                          "lit": null,
+                          "op": "concat",
+                          "source": "native"
+                        }
+                      ],
+                      "attrs": null,
+                      "dim": null,
+                      "lit": null,
+                      "op": "linear",
+                      "source": "native"
+                    }
+                  ],
+                  "attrs": {
+                    "fields": {
+                      "dim": {
+                        "lit": -1
+                      },
+                      "index": {
+                        "lit": 1
+                      },
+                      "sizes": {
+                        "bind": "SZ"
+                      }
+                    }
+                  },
+                  "dim": null,
+                  "lit": null,
+                  "op": "split",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "fields": {
+                  "shape": {
+                    "bind": "S2"
+                  }
+                }
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "mvar": "x"
+                        },
+                        {
+                          "args": [
+                            {
+                              "args": [
+                                {
+                                  "mvar": "Q"
+                                },
+                                {
+                                  "mvar": "K"
+                                }
+                              ],
+                              "attrs": {
+                                "lit": {
+                                  "dim": 0
+                                }
+                              },
+                              "dim": null,
+                              "lit": null,
+                              "op": "concat",
+                              "source": "native"
+                            },
+                            {
+                              "mvar": "V"
+                            }
+                          ],
+                          "attrs": {
+                            "lit": {
+                              "dim": 0
+                            }
+                          },
+                          "dim": null,
+                          "lit": null,
+                          "op": "concat",
+                          "source": "native"
+                        }
+                      ],
+                      "attrs": null,
+                      "dim": null,
+                      "lit": null,
+                      "op": "linear",
+                      "source": "native"
+                    }
+                  ],
+                  "attrs": {
+                    "fields": {
+                      "dim": {
+                        "lit": -1
+                      },
+                      "index": {
+                        "lit": 2
+                      },
+                      "sizes": {
+                        "bind": "SZ"
+                      }
+                    }
+                  },
+                  "dim": null,
+                  "lit": null,
+                  "op": "split",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "fields": {
+                  "shape": {
+                    "bind": "S3"
+                  }
+                }
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        }
+      ],
+      "attrs": {
+        "fields": {
+          "enable_gqa": {
+            "bind": "G"
+          },
+          "scale": {
+            "bind": "SC"
+          }
+        }
+      },
+      "dim": null,
+      "lit": null,
+      "op": "sdpa",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "fusion",
+      "subsumed"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
     "cond": [
       "and",
       [
@@ -3987,6 +4483,300 @@
     "serializable": true,
     "tags": [
       "categorical"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": [
+      "and",
+      [
+        "rank",
+        "q",
+        "==",
+        4
+      ],
+      [
+        "rank",
+        "k",
+        "==",
+        4
+      ],
+      [
+        "rank",
+        "v",
+        "==",
+        4
+      ],
+      [
+        "repeat-chain",
+        "k",
+        "UDk",
+        "ESk",
+        "RSk"
+      ],
+      [
+        "repeat-chain",
+        "v",
+        "UDv",
+        "ESv",
+        "RSv"
+      ],
+      [
+        "attr-eq-attr",
+        "ESk",
+        "ESv"
+      ],
+      [
+        "repeat-heads",
+        "q",
+        "k",
+        "UDk",
+        "ESk"
+      ]
+    ],
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "The diagonal is natural: unsqueeze->expand->reshape copies each kv head r times (repeat_kv).  SDPA implements that copy inside the kernel via enable_gqa — pushing Delta into the consumer deletes the materialisation entirely.",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "q"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "mvar": "k"
+                        }
+                      ],
+                      "attrs": {
+                        "fields": {
+                          "dim": {
+                            "bind": "UDk"
+                          }
+                        }
+                      },
+                      "dim": null,
+                      "lit": null,
+                      "op": "unsqueeze",
+                      "source": "native"
+                    }
+                  ],
+                  "attrs": {
+                    "fields": {
+                      "shape": {
+                        "bind": "ESk"
+                      }
+                    }
+                  },
+                  "dim": null,
+                  "lit": null,
+                  "op": "expand",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "fields": {
+                  "shape": {
+                    "bind": "RSk"
+                  }
+                }
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        {
+                          "mvar": "v"
+                        }
+                      ],
+                      "attrs": {
+                        "fields": {
+                          "dim": {
+                            "bind": "UDv"
+                          }
+                        }
+                      },
+                      "dim": null,
+                      "lit": null,
+                      "op": "unsqueeze",
+                      "source": "native"
+                    }
+                  ],
+                  "attrs": {
+                    "fields": {
+                      "shape": {
+                        "bind": "ESv"
+                      }
+                    }
+                  },
+                  "dim": null,
+                  "lit": null,
+                  "op": "expand",
+                  "source": "native"
+                }
+              ],
+              "attrs": {
+                "fields": {
+                  "shape": {
+                    "bind": "RSv"
+                  }
+                }
+              },
+              "dim": null,
+              "lit": null,
+              "op": "reshape",
+              "source": "native"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        }
+      ],
+      "attrs": {
+        "fields": {
+          "dropout_p": {
+            "bind": "D"
+          },
+          "is_causal": {
+            "bind": "C"
+          }
+        }
+      },
+      "dim": null,
+      "lit": null,
+      "op": "sdpa",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "gqa_absorb_repeat",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "q"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "mvar": "k"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        },
+        {
+          "args": [
+            {
+              "mvar": "v"
+            }
+          ],
+          "attrs": {
+            "lit": {
+              "dim0": 1,
+              "dim1": 2
+            }
+          },
+          "dim": null,
+          "lit": null,
+          "op": "transpose",
+          "source": "native"
+        }
+      ],
+      "attrs": {
+        "fields": {
+          "dropout_p": {
+            "bind": "D"
+          },
+          "enable_gqa": {
+            "lit": true
+          },
+          "is_causal": {
+            "bind": "C"
+          }
+        }
+      },
+      "dim": null,
+      "lit": null,
+      "op": "sdpa",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "fusion"
     ],
     "version": 2
   },

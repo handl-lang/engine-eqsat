@@ -5,11 +5,11 @@
 //! These are the Python bank's laws whose guards fit the ported
 //! [`crate::guard`]/[`crate::shape`] vocabulary: unguarded ports plus
 //! the `cond`/`dspec` members whose side conditions read bound terms,
-//! attrs, and the declarative shape table (`shaped`/`rank`/`dim-eq`/
-//! `bcast-*`/`axes-*`, the `shape`/`dim` specs, `tval`-free attr and
-//! scalar predicates). Laws needing the unported channels stay out —
-//! `tval`/`tapp` tensor values, the `shape`/`dim`/`leaf-dim` dspec
-//! channels, the `flat-map-unsq`/`repeat-*` pairing guards, and the
+//! attrs, and the declarative shape table — stage 4 completed the
+//! vocabulary (`flat-map-unsq`/`repeat-*`/`axis-align-eq`/
+//! `bcast-dim-inv` pairing guards; `shape`/`vshape`/`dim`/`leaf-dim`/
+//! `bcast` dspec channels). Laws needing the remaining channels stay
+//! out — `tval`/`tapp` tensor values, tensor `$leaf:` mints, and the
 //! procedural `check`/`derive` hooks (design doc §2). Each pack's doc
 //! comment carries its own census. Names, `law` strings,
 //! `cond`/`dspec` trees, and tag bundles are carried verbatim so
@@ -23,17 +23,25 @@
 //!   `SIMPLIFICATION_RULES` (monoid/group laws, the silu/square/pow
 //!   decompositions and folds, the view-op strips/folds
 //!   (`select_mul`, `transpose_noop`, `chunk_single`, the
-//!   unsqueeze-pad family, `mul_reshape_inert_l`, `softmax_fold`,
-//!   `glu_fold`), the rsqrt canonicalization, `mul_div_swap`,
-//!   `matmul_div_distribute`, `div_add_factor`,
+//!   unsqueeze-pad family, `mul_unsq_nat`, `mul_reshape_inert_l`,
+//!   `softmax_fold`, `glu_fold`, `rms_norm_fold`,
+//!   `rms_norm_fold_nogain`), the rsqrt canonicalization,
+//!   `mul_div_swap`, `matmul_div_distribute`, `div_add_factor`,
 //!   `div_sqrt_to_rsqrt`, `pow_to_rsqrt`).
 //! * [`categorical`] — the portable members of `CATEGORICAL_RULES`
 //!   (bilinearity and the weight-merge family, the `linear`
 //!   composition/scale laws, scalar naturality and `split_scalar_*`,
-//!   the product-structure fuses, `qkv_fuse`, the `sdpa_fold*`
-//!   family).
-//! * [`attention`] — the scaled slice of `SDPA_EXPAND_RULES` (the
-//!   opt-in `attention` preset's portable half).
+//!   the product-structure fuses `qkv_fuse`/`qkv_fuse_asym`,
+//!   `gqa_absorb_repeat`, the `sdpa_fold*` family).
+//! * [`attention`] — the full `SDPA_EXPAND_RULES` (all eight
+//!   key-sets; the scale-free spellings mint `1/√(q[-1])` through
+//!   the `dim` dspec channel).
+//! * [`batch_norm`] — `BATCH_NORM_RULES`, the opt-in eval-mode
+//!   `batch_norm` expand triple (`$leaf:` Const mint + the
+//!   `concat`/`take`/`len` channel-view dspec).
+//! * [`conv_folds`] — `CONV_FOLD_RULES`, the 60-law conv
+//!   channel-scale/shift family (5 attr-prefixes × bias arity × 6
+//!   rule shapes), opt-in like the Python collection.
 //! * [`prior_art`] — the portable slice of `PRIOR_ART_RULES`: the
 //!   const-algebra folds (`pow_*`, `*_const_*`, `neg_const`, the
 //!   `*_const_assoc_*` families) and the sigmoid/tanh/hardsigmoid
@@ -2746,28 +2754,72 @@ fn sdpa_expanded() -> Pat {
     )
 }
 
-/// The `sdpa_expand*` family — the scaled key-sets only.  The four
-/// scale-free spellings (`{}`, `{dropout_p}`, `+is_causal`,
-/// `+enable_gqa`) need the implicit-scale mint `1/√(q[-1])`, whose
-/// dspec reads `("dim","Q",-1)` — the unported shape channel — so
-/// they stay out (the census in the module docs).
+/// The `sdpa_expand*` family — all eight key-sets.  The four
+/// scale-free spellings (`sdpa_expand`, `_d`, `_dc`, `_dcg`) mint
+/// the implicit scale `1/√(q[-1])` through the `("dim","Q",-1)`
+/// shape channel — ported at stage 4 — and `_d`/`_dc`/`_dcg`'s
+/// `dropout_p`/`is_causal`/`enable_gqa` defaults are literal pins
+/// (no metavariable binds), so they needed no guard at all.
 ///
 /// Python: `tensor.py` `_make_sdpa_expand_rules` /
 /// `SDPA_EXPAND_RULES`, opt-in `attention` preset, tag `attention`,
 /// derivation `sdpa_fold_mul_nomask`.
 fn sdpa_expand_rules() -> Vec<Law> {
-    // (suffix, attrs fields, law text)
-    type SdpaKeyset = (&'static str, Vec<(&'static str, AttrField)>, &'static str);
-    let keysets: [SdpaKeyset; 4] = [
+    // (suffix, attrs fields, law text, dspec)
+    type SdpaKeyset = (
+        &'static str,
+        Vec<(&'static str, AttrField)>,
+        &'static str,
+        serde_json::Value,
+    );
+    // The implicit-scale mint every scale-free key-set shares:
+    // `SC0 = rsqrt(dim(Q, -1))` — the `dim` shape channel reads
+    // Q's last extent (declines → the derive vetoes, never a guess).
+    let free_dspec = || json!({"$leaf:SC0": ["rsqrt", ["dim", "Q", -1]]});
+    let free_law = "sdpa(q, k, v) IS softmax(q@kᵀ/√d)@v with the implicit scale minted as mul(q@kᵀ, 1/√d_head) — the fused op's decomposed form, exposed for the interior laws (refolds through sdpa_fold_mul_nomask / sdpa_fold_nomask).";
+    // Python spells the same kernel-definition text on all four
+    // scaled key-sets (verified against `SDPA_EXPAND_RULES`).
+    let scaled_law = "sdpa(q, k, v, scale=s) IS matmul(softmax(mul(q @ kᵀ, s), dim=-1), v) — the kernel's definition, expanded so the interior becomes a redex for the scale-migration and spelled-attention laws (the decompose half of the expand/fold pair; refolds through sdpa_fold_mul_nomask / sdpa_fold_nomask).";
+    let keysets: [SdpaKeyset; 8] = [
+        // ---- scale-free key-sets (implicit 1/√d mint) ---------------
+        ("", vec![], free_law, free_dspec()),
+        (
+            "_d",
+            vec![("dropout_p", af_lit(json!(0.0)))],
+            free_law,
+            free_dspec(),
+        ),
+        (
+            "_dc",
+            vec![
+                ("dropout_p", af_lit(json!(0.0))),
+                ("is_causal", af_lit(json!(false))),
+            ],
+            free_law,
+            free_dspec(),
+        ),
+        (
+            "_dcg",
+            vec![
+                ("dropout_p", af_lit(json!(0.0))),
+                ("is_causal", af_lit(json!(false))),
+                ("enable_gqa", af_lit(json!(false))),
+            ],
+            free_law,
+            free_dspec(),
+        ),
+        // ---- scaled key-sets (`scale` binds `SC`) -------------------
         (
             "_s",
             vec![("scale", af_bind("SC"))],
-            "sdpa(q, k, v, scale=s) IS matmul(softmax(mul(q @ kᵀ, s), dim=-1), v) — the kernel's definition, expanded so the interior becomes a redex for the scale-migration and spelled-attention laws (the decompose half of the expand/fold pair; refolds through sdpa_fold_mul_nomask / sdpa_fold_nomask).",
+            scaled_law,
+            json!({"$leaf:SC0": ["attr", "SC"]}),
         ),
         (
             "_ds",
             vec![("dropout_p", af_lit(json!(0.0))), ("scale", af_bind("SC"))],
-            "sdpa(q, k, v, dropout_p=0, scale=s) IS matmul(softmax(mul(q @ kᵀ, s), dim=-1), v) — the retained-default spelling of the scaled expansion.",
+            scaled_law,
+            json!({"$leaf:SC0": ["attr", "SC"]}),
         ),
         (
             "_dcs",
@@ -2776,7 +2828,8 @@ fn sdpa_expand_rules() -> Vec<Law> {
                 ("is_causal", af_lit(json!(false))),
                 ("scale", af_bind("SC")),
             ],
-            "sdpa(q, k, v, dropout_p=0, is_causal=False, scale=s) IS matmul(softmax(mul(q @ kᵀ, s), dim=-1), v) — the retained-default spelling of the scaled expansion.",
+            scaled_law,
+            json!({"$leaf:SC0": ["attr", "SC"]}),
         ),
         (
             "_dcgs",
@@ -2786,29 +2839,827 @@ fn sdpa_expand_rules() -> Vec<Law> {
                 ("enable_gqa", af_lit(json!(false))),
                 ("scale", af_bind("SC")),
             ],
-            "sdpa(q, k, v, dropout_p=0, is_causal=False, enable_gqa=False, scale=s) IS matmul(softmax(mul(q @ kᵀ, s), dim=-1), v) — the retained-default spelling of the scaled expansion.",
+            scaled_law,
+            json!({"$leaf:SC0": ["attr", "SC"]}),
         ),
     ];
     keysets
         .into_iter()
-        .map(|(suffix, fields, law)| {
-            Law::new(
-                format!("sdpa_expand{suffix}"),
+        .map(|(suffix, fields, law, dspec)| {
+            // Python `attrs {}` spells the no-declared-attrs
+            // convention (kernel `attrs: None`); the literal-keyed
+            // sets go through `attrs_fields` either way.
+            let lhs = if fields.is_empty() {
+                Pat::Op(
+                    OpPat::new("sdpa")
+                        .arg(Pat::var("Q"))
+                        .arg(Pat::var("K"))
+                        .arg(Pat::var("V")),
+                )
+            } else {
                 Pat::Op(
                     OpPat::new("sdpa")
                         .arg(Pat::var("Q"))
                         .arg(Pat::var("K"))
                         .arg(Pat::var("V"))
                         .attrs_fields(afields(fields)),
-                ),
-                sdpa_expanded(),
-            )
-            .with_law(law)
-            .with_dspec(json!({"$leaf:SC0": ["attr", "SC"]}))
-            .with_derivation("sdpa_fold_mul_nomask")
-            .with_tag("attention")
+                )
+            };
+            Law::new(format!("sdpa_expand{suffix}"), lhs, sdpa_expanded())
+                .with_law(law)
+                .with_dspec(dspec)
+                .with_derivation("sdpa_fold_mul_nomask")
+                .with_tag("attention")
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+//  Stage-4 ports — the flat-map/repeat pairing guards and the
+//  shape-reading dspec channels (`shape`/`dim`/`leaf-dim`/`bcast`)
+//  over `crate::shape`'s inference. What remains Python-side:
+//  `tval`/`tapp` tensor values, procedural `check`/`derive` hooks
+//  (`conv_bn_fold`'s `missing_hooks`), and the `prim:synop*` minted
+//  records' backend-side synthetic-op denotations (their fold
+//  records ship as `laws/prim_folds.json` data instead).
+// ---------------------------------------------------------------------------
+
+/// `mul_unsq_nat`: `unsqueeze(u,d) · unsqueeze(v,d) →
+/// unsqueeze(u · v, d)` under the `flat-map-unsq` pairing guard —
+/// the broadcast grids must coincide AND both operands' flat-read
+/// coefficient maps must agree across the two evaluation orders
+/// (the guard decides the region — broadcast-incompatible pairs and
+/// unproven shapes decline, never a guess).
+///
+/// Python: `tensor.py` `MUL_UNSQ_NAT`, cond
+/// `("flat-map-unsq","u","UD","v",("unsq-out","v","UD"))`, tags
+/// `simplification`.
+pub fn mul_unsq_nat() -> Law {
+    Law::new(
+        "mul_unsq_nat",
+        Pat::op("mul", vec![unsqueeze_u("u"), unsqueeze_u("v")]),
+        Pat::Op(
+            OpPat::new("unsqueeze")
+                .arg(Pat::op("mul", vec![Pat::var("u"), Pat::var("v")]))
+                .attrs_fields(afields(vec![("dim", af_bind("UD"))])),
+        ),
+    )
+    .with_law(
+        "unsqueeze(u, d) · unsqueeze(v, d) = unsqueeze(u · v, d) — elementwise mul commutes with a shared size-1 axis insertion exactly when the broadcast grids coincide AND both operands' flat-read maps agree across the two orders (the flat-map-unsq region — equal ranks always qualify; unequal ranks only when the insert lands in the pad).  Fuses two views into one and shrinks the pointwise domain a rank.",
+    )
+    .with_cond(json!([
+        "flat-map-unsq",
+        "u",
+        "UD",
+        "v",
+        ["unsq-out", "v", "UD"]
+    ]))
+    .with_tag("simplification")
+}
+
+/// The manual-RMSNorm reduction both `rms_norm_fold*` laws share:
+/// `mul(u, rsqrt(add(mean(pow(u, P), dim=MD, keepdim=MK), EPS)))` —
+/// `P`/`EPS` are term metavars (Const leaves), `MD`/`MK` attr binds.
+fn rms_reduce(u: &str) -> Pat {
+    Pat::op(
+        "mul",
+        vec![
+            Pat::var(u),
+            Pat::Op(OpPat::new("rsqrt").arg(Pat::op(
+                "add",
+                vec![
+                        Pat::Op(
+                            OpPat::new("mean")
+                                .arg(Pat::op("pow", vec![Pat::var(u), Pat::var("P")]))
+                                .attrs_fields(afields(vec![
+                                    ("dim", af_bind("MD")),
+                                    ("keepdim", af_bind("MK")),
+                                ])),
+                        ),
+                        Pat::var("EPS"),
+                    ],
+            ))),
+        ],
+    )
+}
+
+/// The shared `rms_norm_fold*` cond prefix: keepdim pinned true,
+/// `EPS` a numeric Const, `P == 2`.
+fn cond_rms_base() -> serde_json::Value {
+    json!([
+        "and",
+        ["attr-is", "MK", true],
+        ["const-num", "EPS"],
+        ["const-cmp", "P", "==", 2]
+    ])
+}
+
+/// The shared `rms_norm_fold*` dspec: the reduce dims name `u`'s
+/// trailing block (the normalized shape) and `eps` mints a Const
+/// leaf through `float(const(EPS))`.
+fn dspec_rms() -> serde_json::Value {
+    json!({
+        "ND": ["shape", ["tail-block", "u", "MD"]],
+        "EP": ["float", ["const", "EPS"]]
+    })
+}
+
+/// `rms_norm(u, w)` spelled manually: `u·rsqrt(mean(u²)+eps)·w`.
+///
+/// Python: `tensor.py` `RMS_NORM_FOLD`, cond
+/// `_COND_RMS_FOLD` + `("shape-eq","w",("tail-block","u","MD"))`,
+/// tags `simplification`.
+pub fn rms_norm_fold() -> Law {
+    Law::new(
+        "rms_norm_fold",
+        Pat::op("mul", vec![rms_reduce("u"), Pat::var("w")]),
+        Pat::Op(
+            OpPat::new("rms_norm")
+                .arg(Pat::var("u"))
+                .arg(Pat::var("w"))
+                .attrs_fields(afields(vec![
+                    ("dim", af_bind("ND")),
+                    ("eps", af_bind("EP")),
+                ])),
+        ),
+    )
+    .with_law(
+        "x·rsqrt(mean(x²)+eps)·w IS rms_norm(x, w): the manual-RMSNorm fold — composed-then-reduced then scaled IS the kernel's definition.  Folds mul+mul+rsqrt+add+mean+pow to one dispatched op.",
+    )
+    .with_cond(json!([
+        "and",
+        cond_rms_base(),
+        ["shape-eq", "w", ["tail-block", "u", "MD"]]
+    ]))
+    .with_dspec(dspec_rms())
+    .with_tag("simplification")
+}
+
+/// `rms_norm(u)` spelled manually — the weight-free twin.
+///
+/// Python: `tensor.py` `RMS_NORM_FOLD_NOGAIN`, cond
+/// `_COND_RMS_FOLD` + `("shaped",("tail-block","u","MD"))`, tags
+/// `simplification`.
+pub fn rms_norm_fold_nogain() -> Law {
+    Law::new(
+        "rms_norm_fold_nogain",
+        rms_reduce("u"),
+        Pat::Op(
+            OpPat::new("rms_norm")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("dim", af_bind("ND")),
+                    ("eps", af_bind("EP")),
+                ])),
+        ),
+    )
+    .with_law(
+        "x·rsqrt(mean(x²)+eps) IS rms_norm(x): the weight-free manual-RMSNorm fold — the gained fold's inner ``mul`` and a real spelling of its own (gain-free RMSNorm blocks).",
+    )
+    .with_cond(json!([
+        "and",
+        cond_rms_base(),
+        ["shaped", ["tail-block", "u", "MD"]]
+    ]))
+    .with_dspec(dspec_rms())
+    .with_tag("simplification")
+}
+
+/// The `head(t, shape_bind)` view for [`qkv_fuse_asym`]'s uneven
+/// splits — `transpose(reshape(t, shape=?S<i>), dim0=1, dim1=2)`
+/// with a per-head shape metavar (unlike [`head_view`]'s shared `S`).
+fn head_view_named(t: Pat, shape_bind: &str) -> Pat {
+    Pat::Op(
+        OpPat::new("transpose")
+            .arg(Pat::Op(
+                OpPat::new("reshape")
+                    .arg(t)
+                    .attrs_fields(afields(vec![("shape", af_bind(shape_bind))])),
+            ))
+            .attrs_lit(json!({"dim0": 1, "dim1": 2})),
+    )
+}
+
+/// `qkv_fuse_asym`: the asymmetric triple pairing — three `linear`
+/// projections of the same input with *different* output dims fuse
+/// into ONE GEMM over the concatenated weights plus three uneven
+/// `split` views (the GQA fused-QKV spelling; `SZ` mints the split
+/// sizes from the weights' declared dim-0 extents via `leaf-dim`).
+///
+/// Python: `Op.make("sdpa", head_Si(linear(x,Q)), …,
+/// scale="SC", enable_gqa="G") → sdpa(head_Si(split_i(linear(x,
+/// cat(cat(Q,K),V)))), …)`, law "Asymmetric triple pairing: the
+/// same product law as qkv_fuse, but the three projections have
+/// different output dims — one GEMM, three uneven split views.
+/// (GQA fused QKV.)", tags `fusion`+`subsumed`.
+pub fn qkv_fuse_asym() -> Law {
+    // The fused weight: `concat(concat(Q, K, dim=0), V, dim=0)` —
+    // same product law as `qkv_fuse`.
+    let fused_weight = Pat::Op(
+        OpPat::new("concat")
+            .arg(Pat::Op(
+                OpPat::new("concat")
+                    .arg(Pat::var("Q"))
+                    .arg(Pat::var("K"))
+                    .attrs_lit(json!({"dim": 0})),
+            ))
+            .arg(Pat::var("V"))
+            .attrs_lit(json!({"dim": 0})),
+    );
+    // One uneven split projection: `split(linear(x, W), sizes=SZ,
+    // dim=-1, index=i)`.
+    let split_proj = |index: i64| {
+        Pat::Op(
+            OpPat::new("split")
+                .arg(Pat::op("linear", vec![Pat::var("x"), fused_weight.clone()]))
+                .attrs_fields(afields(vec![
+                    ("sizes", af_bind("SZ")),
+                    ("dim", af_lit(json!(-1))),
+                    ("index", af_lit(json!(index))),
+                ])),
+        )
+    };
+    let sdpa_attrs = || afields(vec![("scale", af_bind("SC")), ("enable_gqa", af_bind("G"))]);
+    let lhs_heads: Vec<Pat> = [
+        ("S1", Pat::var("Q")),
+        ("S2", Pat::var("K")),
+        ("S3", Pat::var("V")),
+    ]
+    .into_iter()
+    .map(|(s, w)| head_view_named(Pat::op("linear", vec![Pat::var("x"), w]), s))
+    .collect();
+    let rhs_heads: Vec<Pat> = ["S1", "S2", "S3"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| head_view_named(split_proj(i as i64), s))
+        .collect();
+    Law::new(
+        "qkv_fuse_asym",
+        Pat::Op(
+            OpPat::new("sdpa")
+                .args(lhs_heads)
+                .attrs_fields(sdpa_attrs()),
+        ),
+        Pat::Op(OpPat::new("sdpa").args(rhs_heads).attrs_fields(sdpa_attrs())),
+    )
+    .with_law(
+        "Asymmetric triple pairing: the same product law as qkv_fuse, but the three projections have different output dims — one GEMM, three uneven split views.  (GQA fused QKV.)",
+    )
+    .with_dspec(json!({
+        "SZ": ["tuple",
+            ["leaf-dim", "Q", 0],
+            ["leaf-dim", "K", 0],
+            ["leaf-dim", "V", 0]
+        ]
+    }))
+    .with_tag("fusion")
+    .with_tag("subsumed")
+}
+
+/// `gqa_absorb_repeat`: the repeat-absorbed SDPA — the
+/// `unsqueeze → expand → reshape` copies of K/V (each kv head
+/// repeated `r` times, `repeat_kv`) push into the consumer as
+/// `enable_gqa`, deleting the materialisation. The `repeat-chain`
+/// guards verify both copy maps and `repeat-heads` the head-count
+/// equation `q[-2] == k[-2] * r`.
+///
+/// Python: `tensor.py` `GQA_ABSORB_REPEAT`, cond
+/// `_COND_GQA_ABSORB` (`rank==4` ×3, two `repeat-chain`s,
+/// `attr-eq-attr` on the expand shapes, `repeat-heads`), tags
+/// `fusion`.
+pub fn gqa_absorb_repeat() -> Law {
+    // `transpose(t, dim0=1, dim1=2)` — the head view.
+    let head_t = |t: Pat| {
+        Pat::Op(
+            OpPat::new("transpose")
+                .arg(t)
+                .attrs_lit(json!({"dim0": 1, "dim1": 2})),
+        )
+    };
+    // `transpose(reshape(expand(unsqueeze(k, dim=UDk), shape=ESk),
+    // shape=RSk), 1, 2)` — the repeat_kv copy chain for one operand.
+    let repeat_head = |var: &str, ud: &str, es: &str, rs: &str| {
+        head_t(Pat::Op(
+            OpPat::new("reshape")
+                .arg(Pat::Op(
+                    OpPat::new("expand")
+                        .arg(Pat::Op(
+                            OpPat::new("unsqueeze")
+                                .arg(Pat::var(var))
+                                .attrs_fields(afields(vec![("dim", af_bind(ud))])),
+                        ))
+                        .attrs_fields(afields(vec![("shape", af_bind(es))])),
+                ))
+                .attrs_fields(afields(vec![("shape", af_bind(rs))])),
+        ))
+    };
+    // LHS carries only the shared `{dropout_p, is_causal}` binds;
+    // the RHS adds the literal `enable_gqa: true` the absorb
+    // installs (Python's exact keysets on both sides).
+    let shared_attrs = || {
+        afields(vec![
+            ("dropout_p", af_bind("D")),
+            ("is_causal", af_bind("C")),
+        ])
+    };
+    let mut rhs_attrs = shared_attrs();
+    rhs_attrs.insert("enable_gqa".to_string(), af_lit(json!(true)));
+    Law::new(
+        "gqa_absorb_repeat",
+        Pat::Op(
+            OpPat::new("sdpa")
+                .arg(head_t(Pat::var("q")))
+                .arg(repeat_head("k", "UDk", "ESk", "RSk"))
+                .arg(repeat_head("v", "UDv", "ESv", "RSv"))
+                .attrs_fields(shared_attrs()),
+        ),
+        Pat::Op(
+            OpPat::new("sdpa")
+                .arg(head_t(Pat::var("q")))
+                .arg(head_t(Pat::var("k")))
+                .arg(head_t(Pat::var("v")))
+                .attrs_fields(rhs_attrs),
+        ),
+    )
+    .with_law(
+        "The diagonal is natural: unsqueeze->expand->reshape copies each kv head r times (repeat_kv).  SDPA implements that copy inside the kernel via enable_gqa — pushing Delta into the consumer deletes the materialisation entirely.",
+    )
+    .with_cond(json!([
+        "and",
+        ["rank", "q", "==", 4],
+        ["rank", "k", "==", 4],
+        ["rank", "v", "==", 4],
+        ["repeat-chain", "k", "UDk", "ESk", "RSk"],
+        ["repeat-chain", "v", "UDv", "ESv", "RSv"],
+        ["attr-eq-attr", "ESk", "ESv"],
+        ["repeat-heads", "q", "k", "UDk", "ESk"]
+    ]))
+    .with_tag("fusion")
+}
+
+/// The `batch_norm` attrs-fields shared by the three expand laws:
+/// `training`/`momentum`/`eps`/`cudnn_enabled` all bind.
+fn bn_attrs() -> BTreeMap<String, AttrField> {
+    afields(vec![
+        ("training", af_bind("TR")),
+        ("momentum", af_bind("M")),
+        ("eps", af_bind("EP")),
+        ("cudnn_enabled", af_bind("CU")),
+    ])
+}
+
+/// `reshape(t, shape=CH)` — the channel-view reshape every
+/// `batch_norm_expand*` RHS spells (`CH` is dspec-derived).
+fn bn_view(t: Pat) -> Pat {
+    Pat::Op(
+        OpPat::new("reshape")
+            .arg(t)
+            .attrs_fields(afields(vec![("shape", af_bind("CH"))])),
+    )
+}
+
+/// `rsqrt(add(reshape(rv, CH), EPS))` — the eval-mode inverse-std
+/// factor (`EPS` is the `$leaf:`-minted Const).
+fn bn_rsqrt(rv: &str) -> Pat {
+    Pat::Op(OpPat::new("rsqrt").arg(Pat::op("add", vec![bn_view(Pat::var(rv)), Pat::var("EPS")])))
+}
+
+/// The shared `batch_norm_expand*` cond/dspec — eval mode only
+/// (`training=False`), `x` rank 2–6 concrete, channel stats `rm`
+/// rank-1 concrete aligned on `x`'s dim 1, `rv` shaped like `rm`.
+fn bn_expand_guards(extra: &[serde_json::Value]) -> (serde_json::Value, serde_json::Value) {
+    let mut items = vec![
+        json!(["attr-is", "TR", false]),
+        json!(["concrete", "x"]),
+        json!(["rank", "x", ">=", 2]),
+        json!(["rank", "x", "<=", 6]),
+        json!(["concrete", "rm"]),
+        json!(["rank", "rm", "==", 1]),
+        json!(["dim-eq", "x", 1, "rm", 0]),
+        json!(["shape-eq", "rv", "rm"]),
+    ];
+    items.extend(extra.iter().cloned());
+    let mut cond = vec![json!("and")];
+    cond.extend(items);
+    let dspec = json!({
+        "$leaf:EPS": ["attr", "EP"],
+        "CH": ["concat",
+            ["tuple", 1],
+            ["shape", "rm"],
+            ["take", ["tuple", 1, 1, 1, 1], ["sub", ["len", ["shape", "x"]], 2]]
+        ]
+    });
+    (Value::Array(cond), dspec)
+}
+
+/// `batch_norm_expand`: eval-mode `batch_norm(x, γ, β, μ, σ²)` IS
+/// `γ·((x−μ)·rsqrt(σ²+ε)) + β` — the fused kernel's spelled work,
+/// exposed so weight-space laws can fold the per-channel affine into
+/// a neighbouring conv.
+///
+/// Python: `tensor.py` `BATCH_NORM_EXPAND`, tags `simplification`.
+/// Opt-in pack [`batch_norm`] — `BATCH_NORM_RULES` in Python.
+pub fn batch_norm_expand() -> Law {
+    let rhs = Pat::op(
+        "add",
+        vec![
+            Pat::op(
+                "mul",
+                vec![
+                    bn_view(Pat::var("w")),
+                    Pat::op(
+                        "mul",
+                        vec![
+                            Pat::op("sub", vec![Pat::var("x"), bn_view(Pat::var("rm"))]),
+                            bn_rsqrt("rv"),
+                        ],
+                    ),
+                ],
+            ),
+            bn_view(Pat::var("b")),
+        ],
+    );
+    let (cond, dspec) = bn_expand_guards(&[
+        json!(["shape-eq", "w", "rm"]),
+        json!(["shape-eq", "b", "rm"]),
+    ]);
+    Law::new(
+        "batch_norm_expand",
+        Pat::Op(
+            OpPat::new("batch_norm")
+                .arg(Pat::var("x"))
+                .arg(Pat::var("w"))
+                .arg(Pat::var("b"))
+                .arg(Pat::var("rm"))
+                .arg(Pat::var("rv"))
+                .attrs_fields(bn_attrs()),
+        ),
+        rhs,
+    )
+    .with_law(
+        "batch_norm(x, γ, β, μ, σ²) IS γ·((x−μ)·rsqrt(σ²+ε)) + β in eval mode — the fused kernel's spelled work, exposed so weight-space laws can fold the per-channel affine into a neighbouring conv.  Fused member stays cheapest under extraction (priced 4 < ~7 expanded passes).",
+    )
+    .with_cond(cond)
+    .with_dspec(dspec)
+    .with_tag("simplification")
+}
+
+/// `batch_norm_expand_nobias`: the bias-free export arity — the lone
+/// mid operand reads as weight.
+///
+/// Python: `tensor.py` `BATCH_NORM_EXPAND_NOBIAS`, tags
+/// `simplification`.
+pub fn batch_norm_expand_nobias() -> Law {
+    let rhs = Pat::op(
+        "mul",
+        vec![
+            bn_view(Pat::var("w")),
+            Pat::op(
+                "mul",
+                vec![
+                    Pat::op("sub", vec![Pat::var("x"), bn_view(Pat::var("rm"))]),
+                    bn_rsqrt("rv"),
+                ],
+            ),
+        ],
+    );
+    let (cond, dspec) = bn_expand_guards(&[json!(["shape-eq", "w", "rm"])]);
+    Law::new(
+        "batch_norm_expand_nobias",
+        Pat::Op(
+            OpPat::new("batch_norm")
+                .arg(Pat::var("x"))
+                .arg(Pat::var("w"))
+                .arg(Pat::var("rm"))
+                .arg(Pat::var("rv"))
+                .attrs_fields(bn_attrs()),
+        ),
+        rhs,
+    )
+    .with_law(
+        "batch_norm(x, γ, μ, σ²) IS γ·((x−μ)·rsqrt(σ²+ε)) in eval mode — the bias-free export arity (the lone mid operand reads as weight).",
+    )
+    .with_cond(cond)
+    .with_dspec(dspec)
+    .with_tag("simplification")
+}
+
+/// `batch_norm_expand_plain`: the affine-free export arity.
+///
+/// Python: `tensor.py` `BATCH_NORM_EXPAND_PLAIN`, tags
+/// `simplification`.
+pub fn batch_norm_expand_plain() -> Law {
+    let rhs = Pat::op(
+        "mul",
+        vec![
+            Pat::op("sub", vec![Pat::var("x"), bn_view(Pat::var("rm"))]),
+            bn_rsqrt("rv"),
+        ],
+    );
+    let (cond, dspec) = bn_expand_guards(&[]);
+    Law::new(
+        "batch_norm_expand_plain",
+        Pat::Op(
+            OpPat::new("batch_norm")
+                .arg(Pat::var("x"))
+                .arg(Pat::var("rm"))
+                .arg(Pat::var("rv"))
+                .attrs_fields(bn_attrs()),
+        ),
+        rhs,
+    )
+    .with_law(
+        "batch_norm(x, μ, σ²) IS (x−μ)·rsqrt(σ²+ε) in eval mode — the affine-free export arity.",
+    )
+    .with_cond(cond)
+    .with_dspec(dspec)
+    .with_tag("simplification")
+}
+
+/// `BATCH_NORM_RULES` — the opt-in batch-norm expand pack (Python
+/// keeps it out of `ALL_RULES`/`DEFAULT`; the same convention here).
+pub fn batch_norm() -> Vec<Law> {
+    vec![
+        batch_norm_expand(),
+        batch_norm_expand_nobias(),
+        batch_norm_expand_plain(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+//  The conv channel-scale/shift family — `CONV_FOLD_RULES`, the
+//  `_make_conv_fold_rules` port: per-output-channel scale/shift
+//  folds into `conv2d`'s weight/bias under the channel-grid guards.
+// ---------------------------------------------------------------------------
+
+/// The conv attr tails in Python order: `("", 0)`, `("_s", 1)`,
+/// `("_sp", 2)`, `("_spd", 3)`, `("_spdg", 4)` — each prefix binds
+/// the leading attrs `stride`/`padding`/`dilation`/`groups` to the
+/// `ST`/`PD`/`DL`/`GR` attr metavars.
+const CONV_ATTR_TAIL: &[(&str, &str, &str)] = &[
+    ("stride", "ST", ""),
+    ("padding", "PD", "_s"),
+    ("dilation", "DL", "_sp"),
+    ("groups", "GR", "_spd"),
+];
+
+/// The conv family suffixes — `na` attrs bound, `""` for none.
+const CONV_SUFFIXES: &[&str] = &["", "_s", "_sp", "_spd", "_spdg"];
+
+/// The conv2d attrs-fields for the first `na` attr tails — each
+/// binds its attr metavar (`ST`/`PD`/`DL`/`GR`).
+fn conv_attrs(na: usize) -> BTreeMap<String, AttrField> {
+    CONV_ATTR_TAIL[..na]
+        .iter()
+        .map(|(key, mvar, _)| (key.to_string(), af_bind(mvar)))
+        .collect()
+}
+
+/// `conv2d(x, W[, b], attrs…)` — the conv node pattern.
+fn conv_pat(x: Pat, w: Pat, b: Option<Pat>, na: usize) -> Pat {
+    let mut op = OpPat::new("conv2d").arg(x).arg(w);
+    if let Some(b) = b {
+        op = op.arg(b);
+    }
+    if na == 0 {
+        // Python `attrs {}` — the no-declared-attrs spelling (the
+        // `Pat::op` convention: no `__attrs__` key).
+        Pat::Op(op)
+    } else {
+        Pat::Op(op.attrs_fields(conv_attrs(na)))
+    }
+}
+
+/// `reshape(sv, shape=WV)` / `reshape(sv, shape=SV)` — the channel
+/// view reshapes the conv RHS spells (`WV`/`SV` are dspec-derived).
+fn conv_view(var: &Pat, shape_bind: &str) -> Pat {
+    Pat::Op(
+        OpPat::new("reshape")
+            .arg(var.clone())
+            .attrs_fields(afields(vec![("shape", af_bind(shape_bind))])),
+    )
+}
+
+/// The shared conv channel guard for operand `var` (`"sv"` scale /
+/// `"cv"` shift): x/W rank-4 concrete, channel alignment (`dim-eq`
+/// or the groups-aware `attr-cmp` when `groups` is bound), `var`
+/// rank-equal concrete `(1, C, 1, 1)`-shaped, plus the bias triple
+/// when present.
+fn conv_channel_cond(var: &str, na: usize, bias: bool) -> serde_json::Value {
+    let in_ch = if na == 4 {
+        // `x.shape[1] == W.shape[1] * groups` — the grouped-conv
+        // channel equation as an inline `dim`/`attr` expr compare.
+        json!([
+            "attr-cmp",
+            ["dim", "x", 1],
+            "==",
+            ["mul", ["dim", "W", 1], ["attr", "GR"]]
+        ])
+    } else {
+        json!(["dim-eq", "x", 1, "W", 1])
+    };
+    let mut items = vec![
+        json!(["concrete", "x"]),
+        json!(["rank", "x", "==", 4]),
+        json!(["concrete", "W"]),
+        json!(["rank", "W", "==", 4]),
+        in_ch,
+        json!(["concrete", var]),
+        json!(["rank-eq", var, "x"]),
+        json!(["dim-eq-const", var, 0, 1]),
+        json!(["dim-eq", var, 1, "W", 0]),
+        json!(["dim-eq-const", var, 2, 1]),
+        json!(["dim-eq-const", var, 3, 1]),
+    ];
+    if bias {
+        items.extend([
+            json!(["concrete", "b"]),
+            json!(["rank", "b", "==", 1]),
+            json!(["dim-eq", "b", 0, "W", 0]),
+        ]);
+    }
+    let mut cond = vec![json!("and")];
+    cond.extend(items);
+    Value::Array(cond)
+}
+
+/// The `*_rev` laws' extra clauses: the derived `WV`/`SV` views must
+/// equal the freshly-computed channel shapes (the unfold direction
+/// re-derives them, so the guard pins the attr payloads it emits).
+fn conv_rev_extra(bias: bool) -> Vec<serde_json::Value> {
+    let mut extra = vec![json!([
+        "attr-cmp",
+        "WV",
+        "==",
+        ["concat", ["take", ["shape", "W"], 1], ["tuple", 1, 1, 1]]
+    ])];
+    if bias {
+        extra.push(json!(["attr-cmp", "SV", "==", ["take", ["shape", "W"], 1]]));
+    }
+    extra
+}
+
+/// The conv channel-view dspec — `SV = take(shape(W), 1)` (the
+/// `(C,)` channel vector), `WV = concat(SV, (1,1,1))` (the
+/// `(C,1,1,1)` weight broadcast).
+fn conv_dspec() -> serde_json::Value {
+    json!({
+        "SV": ["take", ["shape", "W"], 1],
+        "WV": ["concat", ["take", ["shape", "W"], 1], ["tuple", 1, 1, 1]]
+    })
+}
+
+/// The conv scale RHS: `conv(x, W·reshape(sv,WV), b·reshape(sv,SV))`
+/// (bias) or `conv(x, W·reshape(sv,WV))` (nobias).
+fn conv_scale_rhs(na: usize, bias: bool) -> Pat {
+    let w_fold = Pat::op("mul", vec![Pat::var("W"), conv_view(&Pat::var("sv"), "WV")]);
+    if !bias {
+        return conv_pat(Pat::var("x"), w_fold, None, na);
+    }
+    let b_fold = Pat::op("mul", vec![Pat::var("b"), conv_view(&Pat::var("sv"), "SV")]);
+    conv_pat(Pat::var("x"), w_fold, Some(b_fold), na)
+}
+
+/// The conv shift RHS bias operand: `b ± reshape(cv, SV)` for
+/// `add`/`sub` (bias), `reshape(cv, SV)` alone (nobias add),
+/// `neg(reshape)` (nobias sub).
+fn conv_shift_bias(cv_op: &str, bias: bool) -> Pat {
+    let view = conv_view(&Pat::var("cv"), "SV");
+    if bias {
+        Pat::op(cv_op, vec![Pat::var("b"), view])
+    } else if cv_op == "sub" {
+        Pat::op("neg", vec![view])
+    } else {
+        view
+    }
+}
+
+/// Build the six conv-fold laws for one `(na, bias)` cell — names,
+/// conds, dspecs, derivations and law texts carried verbatim from
+/// `tensor.py`'s `_make_conv_fold_rules`.
+fn conv_fold_group(na: usize, bias: bool) -> Vec<Law> {
+    let suffix = CONV_SUFFIXES[na];
+    let arity = if bias { "" } else { "_nobias" };
+    let name = |stem: &str| format!("{stem}{suffix}{arity}");
+    // The scale/shift operand metavars differ per family.
+    let scale_var = "sv";
+    let shift_var = "cv";
+
+    // ---- scale laws -------------------------------------------------
+    let scale_law_text = "conv2d's per-output-channel scale is a right action on the output: (conv·ŝ)[o] = s[o]·out[o] = conv(x, W∘ŝ′, b∘s)[o] — convolution is linear in its filter.  The conv twin of linear_channel_scale: the fold half of the conv+BN pair.";
+    let scale_l_law_text = "Scale-left twin of conv_channel_scale — the operand order the batch_norm expansion emits (``mul(γ̂, xhat)``).";
+    let rev_law_text =
+        "Unfold the absorbed channel scale back out of the conv (eqsat compares both forms).";
+    let shift_law_text = "conv2d's per-output-channel shift folds into the bias: (conv ± ĉ)[o] = out[o] ± c[o] = conv(x, W, b ± c)[o] — the shift half of the conv+BN weight-space fold.";
+
+    let conv_plain = |na: usize| {
+        conv_pat(
+            Pat::var("x"),
+            Pat::var("W"),
+            bias.then(|| Pat::var("b")),
+            na,
+        )
+    };
+    let mul_pair = |a: Pat, b: Pat| Pat::op("mul", vec![a, b]);
+    let add_pair = |a: Pat, b: Pat| Pat::op("add", vec![a, b]);
+    let sub_pair = |a: Pat, b: Pat| Pat::op("sub", vec![a, b]);
+
+    let mut laws = Vec::with_capacity(6);
+
+    // conv_channel_scale{,_l,_rev}{suffix}{arity}
+    for (stem, left, is_rev) in [
+        ("conv_channel_scale", false, false),
+        ("conv_channel_scale_l", true, false),
+        ("conv_channel_scale_rev", false, true),
+    ] {
+        let lname = name(stem);
+        let (lhs, rhs) = if is_rev {
+            (
+                conv_scale_rhs(na, bias),
+                mul_pair(conv_plain(na), Pat::var(scale_var)),
+            )
+        } else {
+            let conv = conv_plain(na);
+            let outer = if left {
+                mul_pair(Pat::var(scale_var), conv)
+            } else {
+                mul_pair(conv, Pat::var(scale_var))
+            };
+            (outer, conv_scale_rhs(na, bias))
+        };
+        // `conv_channel_scale_rev` is the only unfold — there is no
+        // `_rev_l`/`_rev_sub` in `_make_conv_fold_rules`.
+        let mut cond_items = conv_channel_cond(scale_var, na, bias);
+        if is_rev && let Value::Array(items) = &mut cond_items {
+            items.extend(conv_rev_extra(bias));
+        }
+        let law_text = if is_rev {
+            rev_law_text
+        } else if stem.ends_with("_l") {
+            scale_l_law_text
+        } else {
+            scale_law_text
+        };
+        let mut law = Law::new(&lname, lhs, rhs)
+            .with_law(law_text)
+            .with_cond(cond_items)
+            .with_dspec(conv_dspec())
+            .with_tag("symmetry")
+            .with_tag("expansive");
+        if is_rev {
+            law = law.with_derivation(name("conv_channel_scale"));
+        }
+        laws.push(law);
+    }
+
+    // conv_channel_shift{,_l,_sub}{suffix}{arity}
+    for (stem, op, left) in [
+        ("conv_channel_shift", "add", false),
+        ("conv_channel_shift_l", "add", true),
+        ("conv_channel_shift_sub", "sub", false),
+    ] {
+        let conv = conv_plain(na);
+        let bias_arg = conv_shift_bias(op, bias);
+        let folded = conv_pat(Pat::var("x"), Pat::var("W"), Some(bias_arg), na);
+        let lhs = if left {
+            add_pair(Pat::var(shift_var), conv)
+        } else {
+            match op {
+                "sub" => sub_pair(conv, Pat::var(shift_var)),
+                _ => add_pair(conv, Pat::var(shift_var)),
+            }
+        };
+        laws.push(
+            Law::new(name(stem), lhs, folded)
+                .with_law(shift_law_text)
+                .with_cond(conv_channel_cond(shift_var, na, bias))
+                .with_dspec(conv_dspec())
+                .with_tag("symmetry")
+                .with_tag("expansive"),
+        );
+    }
+    laws
+}
+
+/// `CONV_FOLD_RULES` — the 60-law conv channel-scale/shift family
+/// (5 attr-prefixes × bias arity × 6 rule shapes), opt-in like the
+/// Python collection. Each law's `cond`/`dspec` trees are the
+/// `cond.py`/`_make_conv_fold_rules` spelling carried as record data;
+/// the `shape`/`dim`/`attr`/`take`/`concat`/`tuple`/`sub`/`mul` dspec
+/// and `attr-cmp` inline-expr channels are ported.
+///
+/// Note: the `na == 0` variants spell `attrs {}` as the no-`__attrs__`
+/// convention (kernel `attrs: None`) — a conv2d carrying an empty
+/// attrs *object* is a different e-node and will not match, the same
+/// representational caveat every `Pat::op` law carries.
+pub fn conv_folds() -> Vec<Law> {
+    let mut laws = Vec::with_capacity(60);
+    for na in 0..CONV_SUFFIXES.len() {
+        for bias in [true, false] {
+            laws.extend(conv_fold_group(na, bias));
+        }
+    }
+    laws
 }
 
 // ---------------------------------------------------------------------------
@@ -2820,13 +3671,12 @@ fn sdpa_expand_rules() -> Vec<Law> {
 /// kernel-fold / rsqrt-canonicalization / div-mul-natural laws, the
 /// view-op strips and folds whose guards fit the ported vocabulary
 /// (`select_mul`, `transpose_noop`, `chunk_single`, the
-/// unsqueeze-pad family, `mul_reshape_inert_l`, `softmax_fold`,
-/// `glu_fold`, `matmul_div_distribute`, `div_add_factor`), and the
-/// two const-guarded folds (`div_sqrt_to_rsqrt`, `pow_to_rsqrt`).
-/// The remaining guarded members stay out: `mul_unsq_nat` needs the
-/// unported `flat-map-unsq` pairing guard; `rms_norm_fold`,
-/// `rms_norm_fold_nogain`, `batch_norm_expand*` need the
-/// `shape`/`dim`/`leaf-dim` dspec channels (no tensor backend).
+/// unsqueeze-pad family, `mul_unsq_nat`, `mul_reshape_inert_l`,
+/// `softmax_fold`, `glu_fold`, `rms_norm_fold`,
+/// `rms_norm_fold_nogain`, `matmul_div_distribute`,
+/// `div_add_factor`), and the two const-guarded folds
+/// (`div_sqrt_to_rsqrt`, `pow_to_rsqrt`). `batch_norm_expand*` stays
+/// out — Python keeps `BATCH_NORM_RULES` opt-in too ([`batch_norm`]).
 pub fn simplification() -> Vec<Law> {
     vec![
         comm_add(),
@@ -2852,9 +3702,12 @@ pub fn simplification() -> Vec<Law> {
         mul_unsq_pad_r(),
         sub_unsq_pad_l(),
         add_unsq_pad_r(),
+        mul_unsq_nat(),
         mul_reshape_inert_l(),
         softmax_fold(),
         glu_fold(),
+        rms_norm_fold(),
+        rms_norm_fold_nogain(),
         div_sqrt_to_rsqrt(),
         pow_to_rsqrt(),
         recip_sqrt_to_rsqrt(),
@@ -2868,13 +3721,15 @@ pub fn simplification() -> Vec<Law> {
 /// bilinearity and the weight-merge family, the `linear` merge /
 /// composition / biased-compose laws, scalar naturality and the
 /// `split_scalar_*` lemmas, the product-structure fuses
-/// (`swiglu_fuse`, `parallel_mul_fuse`, `qkv_fuse`), the
-/// diagonal-scale naturality family, and the `sdpa_fold*` family.
-/// The remaining members stay out: `qkv_fuse_asym` needs the
-/// `leaf-dim` dspec channel; `gqa_absorb_repeat` needs the
-/// `repeat-chain`/`repeat-heads` pairing guards; `conv_bn_fold` and
-/// the `prim:synop*` minted records carry transported/procedural
-/// hooks (`missing_hooks`) and tensor-value channels.
+/// (`swiglu_fuse`, `parallel_mul_fuse`, `qkv_fuse`,
+/// `qkv_fuse_asym`), the diagonal-scale naturality family plus
+/// `gqa_absorb_repeat`, and the `sdpa_fold*` family. `conv_bn_fold`
+/// stays out — its procedural `check`/`derive` hooks are the
+/// transported `missing_hooks` — and the `prim:synop*` minted
+/// records stay out of the pack: their fold patterns are portable
+/// LAW_FORMAT=2 data but the synthetic `synop_*` operator
+/// denotations are domain-side, so they ship as the
+/// `laws/prim_folds.json` corpus instead (never in `all`).
 pub fn categorical() -> Vec<Law> {
     let mut laws = vec![
         distribute_matmul_over_add(),
@@ -2902,23 +3757,25 @@ pub fn categorical() -> Vec<Law> {
         swiglu_fuse(),
         parallel_mul_fuse(),
         qkv_fuse(),
+        qkv_fuse_asym(),
         linear_channel_scale(),
         linear_channel_scale_rev(),
         linear_row_scale(),
         linear_row_scale_rev(),
         linear_channel_to_row_scale(),
+        gqa_absorb_repeat(),
     ]);
     laws.extend(sdpa_fold_rules());
     laws
 }
 
-/// The scaled slice of `SDPA_EXPAND_RULES` — the opt-in `attention`
-/// preset's portable half. The four scale-free spellings
-/// (`sdpa_expand`, `_d`, `_dc`, `_dcg`) mint the implicit scale
-/// `1/√(q[-1])` through the `("dim","Q",-1)` dspec channel —
-/// unported — so they stay out, as do `batch_norm_expand*` and the
-/// 42-law `conv_channel_*` family (`shape`/`dim` dspec channels and
-/// `attr-cmp` inline `dim`/`shape` exprs).
+/// The full `SDPA_EXPAND_RULES` — all eight key-sets (the four
+/// scale-free spellings mint `1/√(q[-1])` through the `dim` shape
+/// channel; ported at stage 4). Opt-in `attention` preset, tag
+/// `attention`. `batch_norm_expand*` and the 60-law
+/// `conv_channel_*` family live in their own opt-in packs
+/// ([`batch_norm`], [`conv_folds`]) — Python keeps them out of
+/// `ALL_RULES`/`DEFAULT` the same way.
 pub fn attention() -> Vec<Law> {
     sdpa_expand_rules()
 }
