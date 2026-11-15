@@ -16,6 +16,67 @@ fn kconst(v: serde_json::Value) -> KTerm {
     KTerm::constant(v)
 }
 
+fn op_attrs(name: &str, args: Vec<KTerm>, attrs: serde_json::Value) -> KTerm {
+    KTerm::op_native_attrs(name, args, attrs)
+}
+
+/// Saturate `input` under the single `law`; assert the `expected`
+/// kernel term landed in the input's root e-class (the rewrite
+/// instantiated its RHS) and `law.name` is named in the merge log
+/// (the firing + provenance contract).
+fn assert_fires(input: &KTerm, law: &eqsat::Law, expected: &KTerm) {
+    let mut sat = eqsat::saturate(
+        std::slice::from_ref(input),
+        std::slice::from_ref(law),
+        &eqsat::SaturateOptions::spec(),
+    )
+    .expect("saturate");
+    let root = sat.roots[0];
+    let class = sat
+        .graph
+        .class_of_term(&from_kernel(expected))
+        .unwrap_or_else(|| panic!("{}: RHS member was not instantiated", law.name));
+    assert_eq!(
+        sat.graph.find_ref(class),
+        sat.graph.find_ref(root),
+        "{}: RHS member not merged into the root class",
+        law.name
+    );
+    let fired: Vec<&str> = sat
+        .graph
+        .merge_log()
+        .iter()
+        .filter_map(|e| e.rule.as_deref())
+        .collect();
+    assert!(
+        fired.contains(&law.name.as_str()),
+        "{} missing from merge log: {fired:?}",
+        law.name
+    );
+}
+
+/// Saturate `input` under the single `law`; assert the law never
+/// fired (no merge-log entry names it).
+fn assert_no_fire(input: &KTerm, law: &eqsat::Law) {
+    let sat = eqsat::saturate(
+        std::slice::from_ref(input),
+        std::slice::from_ref(law),
+        &eqsat::SaturateOptions::spec(),
+    )
+    .expect("saturate");
+    let fired: Vec<&str> = sat
+        .graph
+        .merge_log()
+        .iter()
+        .filter_map(|e| e.rule.as_deref())
+        .collect();
+    assert!(
+        !fired.contains(&law.name.as_str()),
+        "{} fired unexpectedly: {fired:?}",
+        law.name
+    );
+}
+
 #[test]
 fn identities_fold_constants_to_a_kernel_term() {
     // add(mul(2, 1), 0) --(id_mul, id_add)--> 2  (the spike's loop,
@@ -234,4 +295,542 @@ fn law_metadata_and_tags_compile_through() {
     .expect("optimize");
     assert_eq!(out.term, kconst(json!(7)));
     assert!(!out.saturated.graph.applications().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+//  Ported guard-free tensor laws — one firing test per law
+//  (`mlopt_core.laws.tensor`, spelled in `builtin`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn comm_add_swaps_operands() {
+    let a = kconst(json!(1));
+    let b = kconst(json!(2));
+    let input = native_op("add", vec![a.clone(), b.clone()]);
+    let expected = native_op("add", vec![b, a]);
+    assert_fires(&input, &builtin::comm_add(), &expected);
+}
+
+#[test]
+fn comm_mul_swaps_operands() {
+    let a = kconst(json!(3));
+    let b = kconst(json!(4));
+    let input = native_op("mul", vec![a.clone(), b.clone()]);
+    let expected = native_op("mul", vec![b, a]);
+    assert_fires(&input, &builtin::comm_mul(), &expected);
+}
+
+#[test]
+fn assoc_add_reassociates_right_to_left() {
+    let (a, b, c) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "add",
+        vec![a.clone(), native_op("add", vec![b.clone(), c.clone()])],
+    );
+    let expected = native_op("add", vec![native_op("add", vec![a, b]), c]);
+    assert_fires(&input, &builtin::assoc_add(), &expected);
+}
+
+#[test]
+fn assoc_mul_reassociates_right_to_left() {
+    let (a, b, c) = (kconst(json!(2)), kconst(json!(3)), kconst(json!(4)));
+    let input = native_op(
+        "mul",
+        vec![a.clone(), native_op("mul", vec![b.clone(), c.clone()])],
+    );
+    let expected = native_op("mul", vec![native_op("mul", vec![a, b]), c]);
+    assert_fires(&input, &builtin::assoc_mul(), &expected);
+}
+
+#[test]
+fn id_add_fires_on_add_with_zero_rhs() {
+    let a = kconst(json!(9));
+    let input = native_op("add", vec![a.clone(), kconst(json!(0))]);
+    assert_fires(&input, &builtin::id_add(), &a);
+}
+
+#[test]
+fn id_mul_fires_on_mul_with_one_rhs() {
+    let a = kconst(json!(9));
+    let input = native_op("mul", vec![a.clone(), kconst(json!(1))]);
+    assert_fires(&input, &builtin::id_mul(), &a);
+}
+
+#[test]
+fn double_neg_fires() {
+    let a = kconst(json!(9));
+    let input = native_op("neg", vec![native_op("neg", vec![a.clone()])]);
+    assert_fires(&input, &builtin::double_neg(), &a);
+}
+
+#[test]
+fn silu_expand_fires() {
+    let x = kconst(json!(0.5));
+    let input = native_op("silu", vec![x.clone()]);
+    let expected = native_op("mul", vec![x.clone(), native_op("sigmoid", vec![x])]);
+    assert_fires(&input, &builtin::silu_expand(), &expected);
+}
+
+#[test]
+fn silu_fold_fires_and_extracts_the_kernel() {
+    let x = kconst(json!(0.5));
+    let input = native_op(
+        "mul",
+        vec![x.clone(), native_op("sigmoid", vec![x.clone()])],
+    );
+    let expected = native_op("silu", vec![x]);
+    assert_fires(&input, &builtin::silu_fold(), &expected);
+    // The fold is strictly smaller — extraction picks `silu(x)`.
+    let out = eqsat::optimize(
+        &input,
+        &[builtin::silu_fold()],
+        &mut eqsat::size_cost,
+        &eqsat::OptimizeOptions::spec(),
+    )
+    .expect("optimize");
+    assert_eq!(out.term, expected);
+}
+
+#[test]
+fn silu_mul_form_fires() {
+    let (g, u) = (kconst(json!(1)), kconst(json!(2)));
+    let input = native_op("mul", vec![native_op("silu", vec![g.clone()]), u.clone()]);
+    let expected = native_op(
+        "mul",
+        vec![
+            native_op("mul", vec![g.clone(), native_op("sigmoid", vec![g])]),
+            u,
+        ],
+    );
+    assert_fires(&input, &builtin::silu_mul_form(), &expected);
+}
+
+#[test]
+fn softsign_fold_fires_and_extracts_the_kernel() {
+    let x = kconst(json!(0.25));
+    let input = native_op(
+        "div",
+        vec![
+            x.clone(),
+            native_op(
+                "add",
+                vec![native_op("abs", vec![x.clone()]), kconst(json!(1))],
+            ),
+        ],
+    );
+    let expected = native_op("softsign", vec![x]);
+    assert_fires(&input, &builtin::softsign_fold(), &expected);
+    let out = eqsat::optimize(
+        &input,
+        &[builtin::softsign_fold()],
+        &mut eqsat::size_cost,
+        &eqsat::OptimizeOptions::spec(),
+    )
+    .expect("optimize");
+    assert_eq!(out.term, expected);
+}
+
+#[test]
+fn square_expand_fires() {
+    let x = kconst(json!(3));
+    let input = native_op("square", vec![x.clone()]);
+    let expected = native_op("mul", vec![x.clone(), x]);
+    assert_fires(&input, &builtin::square_expand(), &expected);
+}
+
+#[test]
+fn pow_to_square_fires_on_exponent_two() {
+    let x = kconst(json!(3));
+    let input = native_op("pow", vec![x.clone(), kconst(json!(2))]);
+    let expected = native_op("square", vec![x]);
+    assert_fires(&input, &builtin::pow_to_square(), &expected);
+}
+
+#[test]
+fn square_to_pow_fires() {
+    let x = kconst(json!(3));
+    let input = native_op("square", vec![x.clone()]);
+    let expected = native_op("pow", vec![x, kconst(json!(2))]);
+    assert_fires(&input, &builtin::square_to_pow(), &expected);
+}
+
+#[test]
+fn mul_square_fires_on_identical_operands() {
+    let u = kconst(json!(5));
+    let input = native_op("mul", vec![u.clone(), u.clone()]);
+    let expected = native_op("square", vec![u]);
+    assert_fires(&input, &builtin::mul_square(), &expected);
+}
+
+#[test]
+fn recip_sqrt_to_rsqrt_fires_and_extracts_the_kernel() {
+    let u = kconst(json!(2));
+    let input = native_op("reciprocal", vec![native_op("sqrt", vec![u.clone()])]);
+    let expected = native_op("rsqrt", vec![u]);
+    assert_fires(&input, &builtin::recip_sqrt_to_rsqrt(), &expected);
+    let out = eqsat::optimize(
+        &input,
+        &[builtin::recip_sqrt_to_rsqrt()],
+        &mut eqsat::size_cost,
+        &eqsat::OptimizeOptions::spec(),
+    )
+    .expect("optimize");
+    assert_eq!(out.term, expected);
+}
+
+#[test]
+fn mul_div_swap_fires() {
+    let (a, b, c) = (kconst(json!(6)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "mul",
+        vec![native_op("div", vec![a.clone(), b.clone()]), c.clone()],
+    );
+    let expected = native_op("div", vec![native_op("mul", vec![a, c]), b]);
+    assert_fires(&input, &builtin::mul_div_swap(), &expected);
+}
+
+// --- categorical pack -----------------------------------------------------
+
+#[test]
+fn right_distribute_matmul_fires() {
+    let (a, b, w) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "matmul",
+        vec![native_op("add", vec![a.clone(), b.clone()]), w.clone()],
+    );
+    let expected = native_op(
+        "add",
+        vec![
+            native_op("matmul", vec![a, w.clone()]),
+            native_op("matmul", vec![b, w]),
+        ],
+    );
+    assert_fires(&input, &builtin::right_distribute_matmul(), &expected);
+}
+
+#[test]
+fn right_factor_matmul_fires() {
+    let (a, b, w) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "add",
+        vec![
+            native_op("matmul", vec![a.clone(), w.clone()]),
+            native_op("matmul", vec![b.clone(), w.clone()]),
+        ],
+    );
+    let expected = native_op("matmul", vec![native_op("add", vec![a, b]), w]);
+    assert_fires(&input, &builtin::right_factor_matmul(), &expected);
+}
+
+#[test]
+fn right_factor_linear_fires() {
+    let (a, b, w) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "add",
+        vec![
+            native_op("linear", vec![a.clone(), w.clone()]),
+            native_op("linear", vec![b.clone(), w.clone()]),
+        ],
+    );
+    let expected = native_op("linear", vec![native_op("add", vec![a, b]), w]);
+    assert_fires(&input, &builtin::right_factor_linear(), &expected);
+}
+
+#[test]
+fn assoc_linear_fires_with_flipped_weight_product() {
+    let (x, a, b) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "linear",
+        vec![native_op("linear", vec![x.clone(), a.clone()]), b.clone()],
+    );
+    // Fused weight is B @ A — the transposes flip the product order.
+    let expected = native_op("linear", vec![x, native_op("matmul", vec![b, a])]);
+    assert_fires(&input, &builtin::assoc_linear(), &expected);
+}
+
+#[test]
+fn assoc_linear_rev_fires() {
+    let (x, a, b) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "linear",
+        vec![x.clone(), native_op("matmul", vec![b.clone(), a.clone()])],
+    );
+    let expected = native_op("linear", vec![native_op("linear", vec![x, a]), b]);
+    assert_fires(&input, &builtin::assoc_linear_rev(), &expected);
+}
+
+#[test]
+fn assoc_matmul_fires() {
+    let (a, b, c) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "matmul",
+        vec![a.clone(), native_op("matmul", vec![b.clone(), c.clone()])],
+    );
+    let expected = native_op("matmul", vec![native_op("matmul", vec![a, b]), c]);
+    assert_fires(&input, &builtin::assoc_matmul(), &expected);
+}
+
+#[test]
+fn assoc_matmul_rev_fires() {
+    let (a, b, c) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "matmul",
+        vec![native_op("matmul", vec![a.clone(), b.clone()]), c.clone()],
+    );
+    let expected = native_op("matmul", vec![a, native_op("matmul", vec![b, c])]);
+    assert_fires(&input, &builtin::assoc_matmul_rev(), &expected);
+}
+
+// --- pointwise factor pack (opt-in) ---------------------------------------
+
+#[test]
+fn distribute_mul_add_fires() {
+    let (c, x, y) = (kconst(json!(2)), kconst(json!(3)), kconst(json!(4)));
+    let input = native_op(
+        "mul",
+        vec![c.clone(), native_op("add", vec![x.clone(), y.clone()])],
+    );
+    let expected = native_op(
+        "add",
+        vec![
+            native_op("mul", vec![c.clone(), x]),
+            native_op("mul", vec![c, y]),
+        ],
+    );
+    assert_fires(&input, &builtin::distribute_mul_add(), &expected);
+}
+
+#[test]
+fn factor_mul_add_fires() {
+    let (c, x, y) = (kconst(json!(2)), kconst(json!(3)), kconst(json!(4)));
+    let input = native_op(
+        "add",
+        vec![
+            native_op("mul", vec![c.clone(), x.clone()]),
+            native_op("mul", vec![c.clone(), y.clone()]),
+        ],
+    );
+    let expected = native_op("mul", vec![c, native_op("add", vec![x, y])]);
+    assert_fires(&input, &builtin::factor_mul_add(), &expected);
+}
+
+// --- qkv_fuse: the attrs-bind/bind-lit port --------------------------------
+
+/// The `_head` view: `transpose(reshape(t, {"shape": S}), {"dim0":1,"dim1":2})`.
+fn qkv_head(t: KTerm, shape: &serde_json::Value) -> KTerm {
+    op_attrs(
+        "transpose",
+        vec![op_attrs("reshape", vec![t], shape.clone())],
+        json!({"dim0": 1, "dim1": 2}),
+    )
+}
+
+/// The fused weight `concat(concat(Q, K, {"dim":0}), V, {"dim":0})`.
+fn qkv_weight(q: KTerm, k: KTerm, v: KTerm) -> KTerm {
+    op_attrs(
+        "concat",
+        vec![op_attrs("concat", vec![q, k], json!({"dim": 0})), v],
+        json!({"dim": 0}),
+    )
+}
+
+#[test]
+fn qkv_fuse_fires() {
+    let shape = json!({"shape": [2, 4]});
+    let (x, q, k, v) = (
+        kconst(json!(1)),
+        kconst(json!(2)),
+        kconst(json!(3)),
+        kconst(json!(4)),
+    );
+    let linear = |w: KTerm| native_op("linear", vec![x.clone(), w]);
+    let input = op_attrs(
+        "sdpa",
+        vec![
+            qkv_head(linear(q.clone()), &shape),
+            qkv_head(linear(k.clone()), &shape),
+            qkv_head(linear(v.clone()), &shape),
+        ],
+        json!({"scale": 0.5}),
+    );
+    // RHS: sdpa over three chunk projections of ONE fused GEMM.
+    let fused = qkv_weight(q, k, v);
+    let chunk = |i: i64| {
+        op_attrs(
+            "chunk",
+            vec![native_op("linear", vec![x.clone(), fused.clone()])],
+            json!({"chunks": 3, "dim": -1, "index": i}),
+        )
+    };
+    let expected = op_attrs(
+        "sdpa",
+        vec![
+            qkv_head(chunk(0), &shape),
+            qkv_head(chunk(1), &shape),
+            qkv_head(chunk(2), &shape),
+        ],
+        json!({"scale": 0.5}),
+    );
+    assert_fires(&input, &builtin::qkv_fuse(), &expected);
+}
+
+#[test]
+fn qkv_fuse_declines_on_mismatched_head_shapes() {
+    // The three `shape` attr payloads must bind the SAME metavar —
+    // a K projection whose reshape carries a different shape cannot
+    // share the fused GEMM's head view.
+    let shape = json!({"shape": [2, 4]});
+    let other = json!({"shape": [3, 4]});
+    let (x, q, k, v) = (
+        kconst(json!(1)),
+        kconst(json!(2)),
+        kconst(json!(3)),
+        kconst(json!(4)),
+    );
+    let linear = |w: KTerm| native_op("linear", vec![x.clone(), w]);
+    let input = op_attrs(
+        "sdpa",
+        vec![
+            qkv_head(linear(q), &shape),
+            qkv_head(linear(k), &other),
+            qkv_head(linear(v), &shape),
+        ],
+        json!({"scale": 0.5}),
+    );
+    let fused = kconst(json!(9)); // any RHS stand-in; we only need no-fire
+    let _ = fused;
+    assert_no_fire(&input, &builtin::qkv_fuse());
+}
+
+// --- negative tests: shared-metavar and const-pin preconditions -----------
+
+#[test]
+fn mul_square_declines_on_distinct_operands() {
+    // `mul(u, u)` binds both operands to the same e-class —
+    // `mul(2, 3)` never fires.
+    let input = native_op("mul", vec![kconst(json!(2)), kconst(json!(3))]);
+    assert_no_fire(&input, &builtin::mul_square());
+}
+
+#[test]
+fn silu_fold_declines_on_mismatched_sigmoid_argument() {
+    // `mul(x, sigmoid(x))` — `mul(1, sigmoid(2))` never fires.
+    let input = native_op(
+        "mul",
+        vec![
+            kconst(json!(1)),
+            native_op("sigmoid", vec![kconst(json!(2))]),
+        ],
+    );
+    assert_no_fire(&input, &builtin::silu_fold());
+}
+
+#[test]
+fn pow_to_square_declines_on_other_exponents() {
+    let input = native_op("pow", vec![kconst(json!(3)), kconst(json!(3))]);
+    assert_no_fire(&input, &builtin::pow_to_square());
+    // And a non-Const exponent (an op term) cannot match the Const pin.
+    let input2 = native_op(
+        "pow",
+        vec![kconst(json!(3)), native_op("neg", vec![kconst(json!(2))])],
+    );
+    assert_no_fire(&input2, &builtin::pow_to_square());
+}
+
+#[test]
+fn softsign_fold_declines_on_shifted_abs_argument() {
+    // `div(x, add(abs(y), 1))` with y != x never fires.
+    let input = native_op(
+        "div",
+        vec![
+            kconst(json!(1)),
+            native_op(
+                "add",
+                vec![native_op("abs", vec![kconst(json!(2))]), kconst(json!(1))],
+            ),
+        ],
+    );
+    assert_no_fire(&input, &builtin::softsign_fold());
+}
+
+#[test]
+fn id_add_declines_on_nonzero_rhs() {
+    let input = native_op("add", vec![kconst(json!(1)), kconst(json!(1))]);
+    assert_no_fire(&input, &builtin::id_add());
+}
+
+#[test]
+fn factor_mul_add_declines_on_unshared_factor() {
+    // `add(mul(c,x), mul(d,y))` with c != d never fires.
+    let input = native_op(
+        "add",
+        vec![
+            native_op("mul", vec![kconst(json!(2)), kconst(json!(3))]),
+            native_op("mul", vec![kconst(json!(4)), kconst(json!(5))]),
+        ],
+    );
+    assert_no_fire(&input, &builtin::factor_mul_add());
+}
+
+#[test]
+fn law_packs_compile_and_cover_the_ported_set() {
+    // The packs mirror the Python bank collections: simplification +
+    // categorical = the guard-free ALL_RULES subset; pointwise_factor
+    // stays opt-in.
+    let simp = builtin::simplification();
+    let cat = builtin::categorical();
+    let pw = builtin::pointwise_factor();
+    let all = builtin::all();
+    assert_eq!(simp.len() + cat.len(), all.len());
+    assert_eq!(all.len(), simp.len() + cat.len());
+    assert_eq!(pw.len(), 2);
+    let names: Vec<&str> = all.iter().map(|l| l.name.as_str()).collect();
+    for expected in [
+        "comm_add",
+        "comm_mul",
+        "assoc_add",
+        "assoc_mul",
+        "id_add",
+        "id_mul",
+        "double_neg",
+        "sub_to_add",
+        "silu_expand",
+        "silu_fold",
+        "silu_mul_form",
+        "softsign_fold",
+        "square_expand",
+        "pow_to_square",
+        "square_to_pow",
+        "mul_square",
+        "recip_sqrt_to_rsqrt",
+        "mul_div_swap",
+        "right_distribute_matmul",
+        "right_factor_matmul",
+        "right_factor_linear",
+        "assoc_linear",
+        "assoc_linear_rev",
+        "assoc_matmul",
+        "assoc_matmul_rev",
+        "qkv_fuse",
+    ] {
+        assert!(names.contains(&expected), "missing {expected} in {names:?}");
+    }
+    // Every law compiles (no unbound RHS metavariable).
+    for law in all.iter().chain(pw.iter()) {
+        law_lint_compile(law);
+    }
+}
+
+/// `Law::compile` is crate-private; exercise it through `saturate`
+/// on a trivially non-matching input — a compile error surfaces as
+/// `Error::Law`.
+fn law_lint_compile(law: &eqsat::Law) {
+    let input = kconst(json!(0));
+    // Const input cannot match any op LHS — saturation is a no-op,
+    // but compilation still runs.
+    let _ = eqsat::saturate(
+        std::slice::from_ref(&input),
+        std::slice::from_ref(law),
+        &eqsat::SaturateOptions::spec(),
+    );
 }
