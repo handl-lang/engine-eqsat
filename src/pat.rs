@@ -178,6 +178,193 @@ impl OpPat {
     }
 }
 
+/// Why a [`Pat`] failed to decode from its JSON record form.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatError {
+    /// The node is not a `{"mvar"}`/`{"const"}`/`{"op"}` record.
+    UnknownNode(String),
+    /// An `{"op"}` record is missing a field or carries a wrong type.
+    MalformedOp(String),
+    /// The `source` tag is not one of
+    /// `native`/`foreign`/`judgment`/`dynamic`.
+    UnknownSource(String),
+    /// The `attrs` spec is not `null`, `{"lit": v}`, or `{"bind": n}`.
+    UnknownAttrs(String),
+}
+
+impl std::fmt::Display for PatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PatError::UnknownNode(desc) => write!(f, "not a pattern record: {desc}"),
+            PatError::MalformedOp(msg) => write!(f, "malformed op pattern: {msg}"),
+            PatError::UnknownSource(s) => write!(f, "unknown pattern source tag: {s:?}"),
+            PatError::UnknownAttrs(desc) => write!(f, "unknown attrs spec: {desc}"),
+        }
+    }
+}
+
+impl std::error::Error for PatError {}
+
+/// The `source` tag string of a [`PatSource`] (the record spelling).
+fn source_name(source: &PatSource) -> &'static str {
+    match source {
+        PatSource::Native => "native",
+        PatSource::Foreign(_) => "foreign",
+        PatSource::Judgment => "judgment",
+        PatSource::Dynamic => "dynamic",
+    }
+}
+
+/// Parse a `source` record tag; `foreign` requires the sibling
+/// `"foreign"` name field (checked by the caller).
+fn source_from(name: &str, foreign: Option<&str>) -> Result<PatSource, PatError> {
+    match name {
+        "native" => Ok(PatSource::Native),
+        "foreign" => match foreign {
+            Some(n) => Ok(PatSource::Foreign(n.to_string())),
+            None => Err(PatError::MalformedOp(
+                "source \"foreign\" requires a \"foreign\" name".to_string(),
+            )),
+        },
+        "judgment" => Ok(PatSource::Judgment),
+        "dynamic" => Ok(PatSource::Dynamic),
+        other => Err(PatError::UnknownSource(other.to_string())),
+    }
+}
+
+impl Pat {
+    /// Encode this pattern as its JSON record form — the `Pat`
+    /// authoring view, never the compiled bridge encoding (design
+    /// doc §1): `{"mvar": name}`, `{"const": <json>}`, or
+    /// `{"op", "dim", "args", "source", "foreign"?, "lit", "attrs"}`.
+    pub fn to_data(&self) -> Value {
+        match self {
+            Pat::Var(name) => serde_json::json!({"mvar": name}),
+            Pat::Const(value) => serde_json::json!({"const": value}),
+            Pat::Op(op) => {
+                let mut rec = serde_json::Map::new();
+                rec.insert("op".to_string(), Value::from(op.op.as_str()));
+                rec.insert(
+                    "dim".to_string(),
+                    match &op.dim {
+                        Some(d) => d.to_data(),
+                        None => Value::Null,
+                    },
+                );
+                rec.insert(
+                    "args".to_string(),
+                    Value::Array(op.args.iter().map(Pat::to_data).collect()),
+                );
+                rec.insert("source".to_string(), Value::from(source_name(&op.source)));
+                if let PatSource::Foreign(name) = &op.source {
+                    rec.insert("foreign".to_string(), Value::from(name.as_str()));
+                }
+                rec.insert(
+                    "lit".to_string(),
+                    match &op.lit {
+                        Some(v) => v.clone(),
+                        None => Value::Null,
+                    },
+                );
+                rec.insert(
+                    "attrs".to_string(),
+                    match &op.attrs {
+                        Some(AttrsSpec::Lit(v)) => serde_json::json!({"lit": v}),
+                        Some(AttrsSpec::Bind(name)) => serde_json::json!({"bind": name}),
+                        None => Value::Null,
+                    },
+                );
+                Value::Object(rec)
+            }
+        }
+    }
+
+    /// Decode a [`Pat`] from its JSON record form (see
+    /// [`Pat::to_data`]).
+    ///
+    /// # Errors
+    ///
+    /// [`PatError`] on any malformed node — unknown shape, missing
+    /// field, bad `source`/`attrs` spelling. Nothing is approximated.
+    pub fn from_data(value: &Value) -> Result<Pat, PatError> {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| PatError::UnknownNode(format!("{value}")))?;
+        if let Some(mvar) = obj.get("mvar") {
+            let name = mvar
+                .as_str()
+                .ok_or_else(|| PatError::UnknownNode(format!("{value}")))?;
+            return Ok(Pat::Var(name.to_string()));
+        }
+        if let Some(c) = obj.get("const") {
+            return Ok(Pat::Const(c.clone()));
+        }
+        if obj.contains_key("op") {
+            return op_pat_from_data(obj);
+        }
+        Err(PatError::UnknownNode(format!("{value}")))
+    }
+}
+
+/// Decode the `{"op", ...}` record form into an [`OpPat`].
+fn op_pat_from_data(obj: &serde_json::Map<String, Value>) -> Result<Pat, PatError> {
+    let bad = |msg: &str| PatError::MalformedOp(msg.to_string());
+    let op = obj
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("\"op\" must be a string"))?
+        .to_string();
+    let dim = match obj.get("dim") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(Box::new(Pat::from_data(v)?)),
+    };
+    let args = match obj.get("args") {
+        None => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(Pat::from_data)
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err(bad("\"args\" must be an array")),
+    };
+    let source_name = obj
+        .get("source")
+        .map(|v| v.as_str().ok_or_else(|| bad("\"source\" must be a string")))
+        .transpose()?
+        .unwrap_or("native");
+    let foreign = obj.get("foreign").and_then(Value::as_str);
+    let source = source_from(source_name, foreign)?;
+    let lit = match obj.get("lit") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.clone()),
+    };
+    let attrs = match obj.get("attrs") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let spec = v
+                .as_object()
+                .ok_or_else(|| PatError::UnknownAttrs(format!("{v}")))?;
+            if let Some(l) = spec.get("lit") {
+                Some(AttrsSpec::Lit(l.clone()))
+            } else if let Some(b) = spec.get("bind") {
+                let name = b
+                    .as_str()
+                    .ok_or_else(|| PatError::UnknownAttrs(format!("{v}")))?;
+                Some(AttrsSpec::Bind(name.to_string()))
+            } else {
+                return Err(PatError::UnknownAttrs(format!("{v}")));
+            }
+        }
+    };
+    Ok(Pat::Op(OpPat {
+        op,
+        dim,
+        args,
+        source,
+        lit,
+        attrs,
+    }))
+}
+
 /// Which side of a law a pattern compiles for — controls the `dim`
 /// default (see module docs).
 #[derive(Clone, Copy, PartialEq, Eq)]

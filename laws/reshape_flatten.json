@@ -1,0 +1,47 @@
+[
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "reshape(x, attrs) = flatten(x, attrs) — attrs payload preserved.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "x"
+        }
+      ],
+      "attrs": {
+        "bind": "a"
+      },
+      "dim": null,
+      "lit": null,
+      "op": "tensor.reshape",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "reshape_flatten",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "x"
+        }
+      ],
+      "attrs": {
+        "bind": "a"
+      },
+      "dim": null,
+      "lit": null,
+      "op": "tensor.flatten",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "demo"
+    ],
+    "version": 2
+  }
+]

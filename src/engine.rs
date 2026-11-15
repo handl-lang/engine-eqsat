@@ -12,7 +12,9 @@ use handl_egraph::{
     StopReason, Term as ETerm, from_kernel, to_kernel,
 };
 
-use crate::law::{self, Law};
+use crate::cost::CostSpec;
+use crate::law::{self, Law, LawError};
+use crate::lawset::LawSet;
 
 /// Why an interpretation call failed.
 #[derive(Debug)]
@@ -25,6 +27,14 @@ pub enum Error {
     Run(RunError),
     /// Extraction found no acyclic representative.
     Extract,
+    /// A law record flagged itself non-serializable
+    /// (`serializable: false` / `missing_hooks`) — firing it would
+    /// silently drop procedural hooks. Named refusal (design doc §1).
+    UnserializableLaw(String),
+    /// A law carries a `cond`/`dspec` guard as deferred data with no
+    /// stage-1 interpreter — firing would silently drop the side
+    /// condition. Named refusal.
+    GuardUnsupported(String),
 }
 
 impl std::fmt::Display for Error {
@@ -34,6 +44,13 @@ impl std::fmt::Display for Error {
             Error::AddTerm(e) => write!(f, "add_term: {e}"),
             Error::Run(e) => write!(f, "saturate: {e}"),
             Error::Extract => f.write_str("no extractable term in e-class"),
+            Error::UnserializableLaw(name) => {
+                write!(f, "law '{name}' is not serializable — refusing to fire")
+            }
+            Error::GuardUnsupported(name) => write!(
+                f,
+                "law '{name}' carries a deferred cond/dspec guard — no interpreter yet"
+            ),
         }
     }
 }
@@ -150,12 +167,18 @@ pub struct OptimizeResult {
 }
 
 /// Compile laws to rewrites (the only place [`Law`] meets
-/// `handl_egraph::Rewrite` — private to the interpretation).
+/// `handl_egraph::Rewrite` — private to the interpretation). The
+/// record-honesty refusals surface as their named [`Error`]
+/// variants, not wrapped [`Error::Law`].
 fn compile_rules(laws: &[Law]) -> Result<Vec<handl_egraph::Rewrite>, Error> {
     laws.iter()
-        .map(Law::compile)
-        .collect::<Result<_, _>>()
-        .map_err(Error::from)
+        .map(|law| match law.compile() {
+            Ok(rule) => Ok(rule),
+            Err(LawError::GuardDeferred { law, .. }) => Err(Error::GuardUnsupported(law)),
+            Err(LawError::Unserializable { law, .. }) => Err(Error::UnserializableLaw(law)),
+            Err(e) => Err(Error::Law(e)),
+        })
+        .collect()
 }
 
 /// Build the `RunOptions` for one saturation pass. The lifetime is
@@ -236,30 +259,31 @@ pub fn extract_best(
     Some(to_kernel(&best))
 }
 
-/// The one-shot interpretation: lift `term`, saturate under `laws`,
-/// extract the cheapest member under `cost`, return it as a kernel
-/// `Term` alongside the saturated graph.
+/// The one-shot interpretation over **internal** terms: lift `term`,
+/// saturate under `laws`, extract the cheapest member under
+/// `cost_fn` (priced on `handl_egraph::Term` — no bridge crossing),
+/// return it as a kernel `Term` alongside the saturated graph.
+///
+/// This is the shared body of [`optimize`] (kernel-priced costs) and
+/// [`optimize_spec`] ([`CostSpec`] data priced engine-side).
 ///
 /// # Errors
 ///
 /// See [`saturate`]; plus [`Error::Extract`] when the root class has
 /// no extractable member.
-pub fn optimize(
+fn optimize_inner(
     term: &KernelTerm,
     laws: &[Law],
-    cost: &mut dyn FnMut(&KernelTerm) -> f64,
+    cost_fn: &mut dyn FnMut(&ETerm) -> f64,
     opts: &OptimizeOptions,
 ) -> Result<OptimizeResult, Error> {
     let rules = compile_rules(laws)?;
     let mut graph = EGraph::new();
     let root = graph.add_term(&from_kernel(term), "input")?;
 
-    // One adapter prices kernel terms — reused by the `Improving`
+    // One adapter prices internal terms — reused by the `Improving`
     // stop's in-run extraction and the final `extract_best`.
-    let mut adapted = |t: &ETerm| {
-        let k = to_kernel(t);
-        cost(&k)
-    };
+    let mut adapted = |t: &ETerm| cost_fn(t);
 
     let mut run_opts = run_options(&opts.saturate);
     match opts.stop {
@@ -284,6 +308,128 @@ pub fn optimize(
             stats,
         },
     })
+}
+
+/// The one-shot interpretation: lift `term`, saturate under `laws`,
+/// extract the cheapest member under `cost`, return it as a kernel
+/// `Term` alongside the saturated graph.
+///
+/// `cost` prices **kernel** terms — the wrapper lowers each candidate
+/// e-graph term through `to_kernel` before pricing (total, but not
+/// free). For serializable costs use [`optimize_spec`], which prices
+/// the internal term directly (design doc §3).
+///
+/// # Errors
+///
+/// See `optimize_inner`.
+pub fn optimize(
+    term: &KernelTerm,
+    laws: &[Law],
+    cost: &mut dyn FnMut(&KernelTerm) -> f64,
+    opts: &OptimizeOptions,
+) -> Result<OptimizeResult, Error> {
+    let mut adapted = |t: &ETerm| {
+        let k = to_kernel(t);
+        cost(&k)
+    };
+    optimize_inner(term, laws, &mut adapted, opts)
+}
+
+/// [`optimize`] over a serializable [`CostSpec`]: the spec prices
+/// internal e-graph terms directly — `count`/`size`/`op_table` never
+/// cross the `to_kernel` bridge per node (design doc §3's
+/// engine-side interpretation).
+///
+/// # Errors
+///
+/// See `optimize_inner`.
+pub fn optimize_spec(
+    term: &KernelTerm,
+    laws: &[Law],
+    cost: &CostSpec,
+    opts: &OptimizeOptions,
+) -> Result<OptimizeResult, Error> {
+    let mut adapted = |t: &ETerm| cost.price(t);
+    optimize_inner(term, laws, &mut adapted, opts)
+}
+
+/// [`extract_best`] over a serializable [`CostSpec`] — prices
+/// internal terms directly (see [`optimize_spec`]).
+pub fn extract_best_spec(graph: &mut EGraph, root: ClassId, cost: &CostSpec) -> Option<KernelTerm> {
+    let mut adapted = |t: &ETerm| cost.price(t);
+    let best = graph.extract_best(root, &mut adapted, None, None)?;
+    Some(to_kernel(&best))
+}
+
+/// The search-engine contract of design doc §5 (ADR-0177):
+/// `saturate`/`optimize`/`name` over [`LawSet`] + [`CostSpec`]
+/// **data** — not closures — which is what makes a second search
+/// interpretation implementable without re-deriving the contract.
+///
+/// Minted inside this crate (not `hnl-engine`, not a contract crate):
+/// promote only when a second interpretation lands. [`EGraphEngine`]
+/// is the sole impl — the current free functions, wrapped.
+pub trait SearchEngine {
+    /// Saturate `terms` under `laws`; return roots + provenance.
+    ///
+    /// # Errors
+    ///
+    /// See [`saturate`] — including [`Error::UnserializableLaw`] and
+    /// [`Error::GuardUnsupported`] for records whose honesty flags
+    /// or deferred guards forbid firing.
+    fn saturate(
+        &self,
+        terms: &[KernelTerm],
+        laws: &LawSet,
+        opts: &SaturateOptions,
+    ) -> Result<Saturated, Error>;
+
+    /// One-shot: lift, saturate, extract min-cost under `cost`,
+    /// lower.
+    ///
+    /// # Errors
+    ///
+    /// See [`optimize_spec`].
+    fn optimize(
+        &self,
+        term: &KernelTerm,
+        laws: &LawSet,
+        cost: &CostSpec,
+        opts: &OptimizeOptions,
+    ) -> Result<OptimizeResult, Error>;
+
+    /// Name for provenance/diagnostics (`"eqsat"`).
+    fn name(&self) -> &'static str;
+}
+
+/// The e-graph search interpretation — the crate's free functions
+/// behind the [`SearchEngine`] contract.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EGraphEngine;
+
+impl SearchEngine for EGraphEngine {
+    fn saturate(
+        &self,
+        terms: &[KernelTerm],
+        laws: &LawSet,
+        opts: &SaturateOptions,
+    ) -> Result<Saturated, Error> {
+        saturate(terms, laws.laws(), opts)
+    }
+
+    fn optimize(
+        &self,
+        term: &KernelTerm,
+        laws: &LawSet,
+        cost: &CostSpec,
+        opts: &OptimizeOptions,
+    ) -> Result<OptimizeResult, Error> {
+        optimize_spec(term, laws.laws(), cost, opts)
+    }
+
+    fn name(&self) -> &'static str {
+        "eqsat"
+    }
 }
 
 /// A size cost priced on **kernel** terms: `Const`/`Opaque` leaves

@@ -1,0 +1,581 @@
+//! Tests for the P2 search contracts, stage 1 (design doc
+//! `docs/design/p2-search-contracts.md`, ADR-0177): the law JSON
+//! record codec, `CostSpec`, `LawSet`, the `SearchEngine` trait, and
+//! the `laws/*.json` reference corpus.
+
+use handl_egraph::from_kernel;
+use hnl_engine::Term as KTerm;
+use hnl_engine_eqsat::cost::{CostError, CostSpec, OpEntry};
+use hnl_engine_eqsat::law::{self, Law, LawError, RecordError};
+use hnl_engine_eqsat::lawset::LawSet;
+use hnl_engine_eqsat::pat::{AttrsSpec, OpPat, Pat, PatError, PatSource};
+use hnl_engine_eqsat::{self as eqsat, builtin};
+use serde_json::{Value, json};
+
+fn kconst(v: Value) -> KTerm {
+    KTerm::constant(v)
+}
+
+fn native_op(name: &str, args: Vec<KTerm>) -> KTerm {
+    KTerm::op_native(name, args)
+}
+
+// ---------------------------------------------------------------------------
+//  Pat codec
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pat_record_round_trips_all_node_kinds() {
+    // mvar / const / op with dim, args, source, foreign, lit, attrs.
+    let pat = Pat::Op(
+        OpPat::new("tensor.reshape")
+            .dim(Pat::var("d"))
+            .arg(Pat::var("x"))
+            .arg(Pat::constant(json!([2, 2])))
+            .source(PatSource::Foreign("host.fn".to_string()))
+            .lit(json!({"k": 1}))
+            .attrs_lit(json!({"shape": [2, 2]})),
+    );
+    let data = pat.to_data();
+    assert_eq!(Pat::from_data(&data).unwrap(), pat);
+
+    // The record spelling is the authoring view, spelled out.
+    assert_eq!(data["op"], "tensor.reshape");
+    assert_eq!(data["dim"], json!({"mvar": "d"}));
+    assert_eq!(data["source"], "foreign");
+    assert_eq!(data["foreign"], "host.fn");
+    assert_eq!(data["lit"], json!({"k": 1}));
+    assert_eq!(data["attrs"], json!({"lit": {"shape": [2, 2]}}));
+
+    // Leaf forms.
+    assert_eq!(Pat::Var("a".into()).to_data(), json!({"mvar": "a"}));
+    assert_eq!(Pat::constant(json!(0)).to_data(), json!({"const": 0}));
+    assert_eq!(
+        Pat::from_data(&json!({"const": null})).unwrap(),
+        Pat::Const(Value::Null)
+    );
+}
+
+#[test]
+fn pat_attrs_bind_and_source_variants_round_trip() {
+    let pat = Pat::Op(
+        OpPat::new("reshape")
+            .arg(Pat::var("t"))
+            .attrs_bind("S")
+            .source(PatSource::Judgment),
+    );
+    let back = Pat::from_data(&pat.to_data()).unwrap();
+    assert_eq!(back, pat);
+    match &back {
+        Pat::Op(op) => {
+            assert_eq!(op.attrs, Some(AttrsSpec::Bind("S".to_string())));
+            assert_eq!(op.source, PatSource::Judgment);
+        }
+        _ => panic!("expected op"),
+    }
+
+    // Dynamic source.
+    let dyn_pat = Pat::Op(OpPat::new("f").source(PatSource::Dynamic));
+    assert_eq!(Pat::from_data(&dyn_pat.to_data()).unwrap(), dyn_pat);
+}
+
+#[test]
+fn pat_decode_refuses_malformed_records() {
+    // Not an object / unknown node.
+    assert!(matches!(
+        Pat::from_data(&json!([1, 2])),
+        Err(PatError::UnknownNode(_))
+    ));
+    assert!(matches!(
+        Pat::from_data(&json!({"bogus": 1})),
+        Err(PatError::UnknownNode(_))
+    ));
+    // Bad source tag.
+    assert!(matches!(
+        Pat::from_data(&json!({"op": "f", "source": "warp"})),
+        Err(PatError::UnknownSource(_))
+    ));
+    // foreign without a name.
+    assert!(matches!(
+        Pat::from_data(&json!({"op": "f", "source": "foreign"})),
+        Err(PatError::MalformedOp(_))
+    ));
+    // Bad attrs spec.
+    assert!(matches!(
+        Pat::from_data(&json!({"op": "f", "attrs": {"other": 1}})),
+        Err(PatError::UnknownAttrs(_))
+    ));
+    // args not an array.
+    assert!(matches!(
+        Pat::from_data(&json!({"op": "f", "args": {}})),
+        Err(PatError::MalformedOp(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+//  Law record codec
+// ---------------------------------------------------------------------------
+
+#[test]
+fn law_record_round_trips_through_json() {
+    for law in builtin::simplification()
+        .into_iter()
+        .chain([builtin::reshape_flatten()])
+    {
+        let data = law.to_data();
+        // LAW_FORMAT = 2 field set, spelled like serialize.py.
+        for key in [
+            "version",
+            "kind",
+            "name",
+            "law",
+            "lhs",
+            "rhs",
+            "cond",
+            "dspec",
+            "tags",
+            "derivation",
+            "cert",
+            "error_bound",
+            "bound_norm",
+            "serializable",
+            "missing_hooks",
+        ] {
+            assert!(data.get(key).is_some(), "{} missing {key}", law.name);
+        }
+        assert_eq!(data["version"], 2);
+        assert_eq!(data["kind"], "law");
+        let back = Law::from_data(&data).unwrap_or_else(|e| panic!("{}: {e}", law.name));
+        assert_eq!(back, law, "{}", law.name);
+        // Text round-trip too.
+        let text = serde_json::to_string(&data).unwrap();
+        assert_eq!(Law::from_json(&text).unwrap(), law);
+    }
+}
+
+#[test]
+fn law_record_carries_every_metadata_field() {
+    let law = Law::new("eps_law", Pat::var("a"), Pat::var("a"))
+        .with_law("approximate identity")
+        .with_tag("epsilon")
+        .with_derivation("step-1")
+        .with_derivation("step-2")
+        .with_cert(json!({"steps": 2}))
+        .with_error_bound(1e-3, "spectral");
+    let back = Law::from_data(&law.to_data()).unwrap();
+    assert_eq!(back, law);
+    assert_eq!(back.error_bound, Some(1e-3));
+    assert_eq!(back.bound_norm, "spectral");
+    assert_eq!(back.derivation, vec!["step-1", "step-2"]);
+    assert_eq!(back.cert, Some(json!({"steps": 2})));
+}
+
+#[test]
+fn deferred_cond_and_dspec_load_but_refuse_to_fire() {
+    // A record carrying guard trees loads with the data preserved —
+    // never silently dropped — and compile names the refusal.
+    let mut law = builtin::id_add();
+    law.cond = Some(json!(["and", ["attr-eq", "dim", 1]]));
+    law.dspec = Some(json!(["attr", "out"]));
+    let back = Law::from_data(&law.to_data()).unwrap();
+    assert_eq!(back.cond, law.cond);
+    assert_eq!(back.dspec, law.dspec);
+    assert!(matches!(
+        back.compile(),
+        Err(LawError::GuardDeferred { field: "cond", .. })
+    ));
+
+    // dspec alone is also deferred.
+    let mut law2 = builtin::id_add();
+    law2.dspec = Some(json!(["attr", "x"]));
+    assert!(matches!(
+        law2.compile(),
+        Err(LawError::GuardDeferred { field: "dspec", .. })
+    ));
+}
+
+#[test]
+fn unserializable_records_refuse_at_fire_time() {
+    // serializable:false — procedural hooks the data cannot carry.
+    let mut law = builtin::id_add();
+    law.serializable = false;
+    law.missing_hooks.insert("check".to_string());
+    let back = Law::from_data(&law.to_data()).unwrap();
+    assert!(!back.serializable);
+    assert!(matches!(
+        back.compile(),
+        Err(LawError::Unserializable { .. })
+    ));
+
+    // missing_hooks alone (serializable still true in the record)
+    // also refuses — a named hook is a dropped hook.
+    let mut law2 = builtin::id_add();
+    law2.missing_hooks.insert("derive".to_string());
+    assert!(matches!(
+        law2.compile(),
+        Err(LawError::Unserializable { .. })
+    ));
+}
+
+#[test]
+fn engine_names_the_record_refusals() {
+    // saturate/optimize surface the named Error variants, not a
+    // wrapped LawError.
+    let guarded = {
+        let mut l = builtin::id_add();
+        l.cond = Some(json!(["leaf"]));
+        l
+    };
+    let input = native_op("add", vec![kconst(json!(1)), kconst(json!(0))]);
+    match eqsat::saturate(
+        std::slice::from_ref(&input),
+        &[guarded],
+        &eqsat::SaturateOptions::spec(),
+    ) {
+        Err(e) => assert!(
+            matches!(e, eqsat::Error::GuardUnsupported(ref n) if n == "id_add"),
+            "got {e}"
+        ),
+        Ok(_) => panic!("guarded law must not fire"),
+    }
+
+    let mut flagged = builtin::id_add();
+    flagged.serializable = false;
+    flagged.missing_hooks.insert("check".to_string());
+    match eqsat::optimize(
+        &input,
+        &[flagged],
+        &mut eqsat::size_cost,
+        &eqsat::OptimizeOptions::spec(),
+    ) {
+        Err(e) => assert!(
+            matches!(e, eqsat::Error::UnserializableLaw(ref n) if n == "id_add"),
+            "got {e}"
+        ),
+        Ok(_) => panic!("non-serializable law must not fire"),
+    }
+}
+
+#[test]
+fn law_record_decode_refuses_bad_records() {
+    // Wrong version.
+    let mut data = builtin::id_add().to_data();
+    data["version"] = json!(1);
+    assert!(matches!(
+        Law::from_data(&data),
+        Err(RecordError::Version(_))
+    ));
+    // Unknown kind.
+    let mut data = builtin::id_add().to_data();
+    data["kind"] = json!("abstraction");
+    assert!(matches!(Law::from_data(&data), Err(RecordError::Kind(_))));
+    // Missing name.
+    let mut data = builtin::id_add().to_data();
+    data.as_object_mut().unwrap().remove("name");
+    assert!(matches!(
+        Law::from_data(&data),
+        Err(RecordError::Malformed(_))
+    ));
+    // Malformed lhs pattern surfaces as Pattern{side:"lhs"}.
+    let mut data = builtin::id_add().to_data();
+    data["lhs"] = json!({"bogus": 1});
+    assert!(matches!(
+        Law::from_data(&data),
+        Err(RecordError::Pattern { side: "lhs", .. })
+    ));
+    // kind absent defaults to "law" (the Python object_kind posture).
+    let mut data = builtin::id_add().to_data();
+    data.as_object_mut().unwrap().remove("kind");
+    assert!(Law::from_data(&data).is_ok());
+}
+
+#[test]
+fn law_from_data_free_function_and_json_entry() {
+    let data = builtin::double_neg().to_data();
+    assert_eq!(law::from_data(&data).unwrap().name, "double_neg");
+    let text = serde_json::to_string(&data).unwrap();
+    assert_eq!(law::Law::from_json(&text).unwrap().name, "double_neg");
+    assert!(matches!(
+        Law::from_json("not json"),
+        Err(RecordError::Json(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+//  LawSet
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lawset_from_json_accepts_array_record_and_envelope() {
+    let set = LawSet::from_laws(builtin::simplification());
+    let text = serde_json::to_string_pretty(&set.to_data()).unwrap();
+
+    // Array of records.
+    let a = LawSet::from_json(&text).unwrap();
+    assert_eq!(a, set);
+    // {"laws": [...]} envelope.
+    let env = format!("{{\"laws\": {text}, \"extra\": 1}}");
+    assert_eq!(LawSet::from_json(&env).unwrap(), set);
+    // Single record object.
+    let one = serde_json::to_string(&set.laws()[0].to_data()).unwrap();
+    let single = LawSet::from_json(&one).unwrap();
+    assert_eq!(single.len(), 1);
+    assert_eq!(single.laws()[0].name, set.laws()[0].name);
+}
+
+#[test]
+fn lawset_reports_the_failing_member() {
+    let mut good = builtin::id_add().to_data();
+    good["name"] = json!("good");
+    let mut bad = builtin::id_mul().to_data();
+    bad["lhs"] = json!({"nope": true});
+    bad["name"] = json!("bad_law");
+    let text = serde_json::to_string(&json!([good, bad])).unwrap();
+    match LawSet::from_json(&text) {
+        Err(RecordError::SetMember { index, name, .. }) => {
+            assert_eq!(index, 1);
+            assert_eq!(name.as_deref(), Some("bad_law"));
+        }
+        other => panic!("expected SetMember, got {other:?}"),
+    }
+}
+
+#[test]
+fn lawset_compile_collects_rules_and_refuses_sets() {
+    let set = LawSet::from_laws(vec![builtin::id_add(), builtin::id_mul()]);
+    let rules = set.compile().unwrap();
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0].name.as_ref(), "id_add");
+
+    let mut guarded = builtin::id_mul();
+    guarded.cond = Some(json!(["leaf"]));
+    let bad = LawSet::from_laws(vec![guarded]);
+    assert!(matches!(bad.compile(), Err(LawError::GuardDeferred { .. })));
+}
+
+// ---------------------------------------------------------------------------
+//  CostSpec
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cost_count_and_size_price_internal_terms() {
+    // add(mul(2, 1), 0): kernel -> e-graph term.
+    let kernel = native_op(
+        "add",
+        vec![
+            native_op("mul", vec![kconst(json!(2)), kconst(json!(1))]),
+            kconst(json!(0)),
+        ],
+    );
+    let eterm = from_kernel(&kernel);
+
+    // size mirrors engine::size_cost: Const leaves 0, ops 1+children,
+    // dim slot counted (its Const(1) dim is a Leaf -> 0).
+    assert_eq!(CostSpec::Size.price(&eterm), eqsat::size_cost(&kernel));
+    assert_eq!(CostSpec::Size.price(&eterm), 2.0);
+
+    // count: every node 1 — add, mul, 3 const leaves, 2 dim leaves.
+    assert_eq!(CostSpec::Count.price(&eterm), 7.0);
+}
+
+#[test]
+fn cost_op_table_weights_views_and_dim_leaf() {
+    let table = eqsat::OpTable {
+        name: Some("t".to_string()),
+        default: 1.0,
+        leaf: 0.0,
+        dim_leaf: Some(5.0),
+        ops: [
+            ("add".to_string(), OpEntry::Weight(10.0)),
+            ("tensor.reshape".to_string(), OpEntry::View),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let spec = CostSpec::OpTable(table);
+
+    // add(1, 2): head 10 + dim leaf 5 + two const leaves 0 = 15.
+    let add = from_kernel(&native_op("add", vec![kconst(json!(1)), kconst(json!(2))]));
+    assert_eq!(spec.price(&add), 15.0);
+
+    // mul is unlisted -> default 1 + dim_leaf 5 = 6.
+    let mul = from_kernel(&native_op("mul", vec![kconst(json!(1)), kconst(json!(2))]));
+    assert_eq!(spec.price(&mul), 6.0);
+
+    // A view op is free but its children still price.
+    let view = from_kernel(&KTerm::op_native_attrs(
+        "tensor.reshape",
+        vec![kconst(json!(1))],
+        json!({"s": 1}),
+    ));
+    // head 0 (view) + dim_leaf 5 + arg leaf 0 + __attrs__ rides attrs
+    // not children -> 5.
+    assert_eq!(spec.price(&view), 5.0);
+
+    // dim_leaf None falls back to leaf.
+    let mut t2 = spec.clone();
+    if let CostSpec::OpTable(ref mut tab) = t2 {
+        tab.dim_leaf = None;
+    }
+    assert_eq!(t2.price(&add), 10.0);
+}
+
+#[test]
+fn cost_flops_formula_defers_to_infinity() {
+    // A "flops" entry is kept as data (deferred until shape
+    // inference) and prices +inf — never under-priced.
+    let spec = CostSpec::from_data(&json!({
+        "kind": "op_table",
+        "default": 1.0,
+        "leaf": 0.0,
+        "ops": {"matmul": {"flops": "2*m*n*k"}, "add": 2.0}
+    }))
+    .unwrap();
+    let mm = from_kernel(&native_op(
+        "matmul",
+        vec![kconst(json!(1)), kconst(json!(2))],
+    ));
+    assert!(spec.price(&mm).is_infinite());
+
+    // Round-trip preserves the formula.
+    let back = CostSpec::from_data(&spec.to_data()).unwrap();
+    assert_eq!(back, spec);
+}
+
+#[test]
+fn cost_record_round_trips_and_refuses_unknown_kinds() {
+    for spec in [
+        CostSpec::Count,
+        CostSpec::Size,
+        CostSpec::OpTable(eqsat::OpTable {
+            name: None,
+            default: 0.5,
+            leaf: 0.25,
+            dim_leaf: None,
+            ops: [("add".to_string(), OpEntry::Weight(3.0))]
+                .into_iter()
+                .collect(),
+        }),
+    ] {
+        assert_eq!(CostSpec::from_data(&spec.to_data()).unwrap(), spec);
+    }
+
+    // Unknown kinds refused at load — named, never approximated.
+    for kind in ["flops", "roofline", "fusion", "executor"] {
+        let data = json!({"kind": kind});
+        assert!(
+            matches!(CostSpec::from_data(&data), Err(CostError::UnknownKind(_))),
+            "{kind} must be refused"
+        );
+    }
+    // Malformed records.
+    assert!(matches!(
+        CostSpec::from_data(&json!({"kind": 3})),
+        Err(CostError::Malformed(_))
+    ));
+    assert!(matches!(
+        CostSpec::from_data(&json!(["count"])),
+        Err(CostError::Malformed(_))
+    ));
+    assert!(matches!(
+        CostSpec::from_data(&json!({"kind": "op_table", "ops": {"f": "x"}})),
+        Err(CostError::BadEntry { .. })
+    ));
+    // from_json text path.
+    assert_eq!(
+        CostSpec::from_json("{\"kind\": \"count\"}").unwrap(),
+        CostSpec::Count
+    );
+    assert!(matches!(
+        CostSpec::from_json("nope"),
+        Err(CostError::Malformed(_))
+    ));
+}
+
+#[test]
+fn optimize_spec_prices_engine_side() {
+    // The doc's quick-start term through the CostSpec path.
+    let input = native_op(
+        "add",
+        vec![
+            native_op("mul", vec![kconst(json!(2)), kconst(json!(1))]),
+            kconst(json!(0)),
+        ],
+    );
+    let set = LawSet::from_json(include_str!("../laws/simplification.json")).unwrap();
+    let out = eqsat::optimize_spec(
+        &input,
+        set.laws(),
+        &CostSpec::Size,
+        &eqsat::OptimizeOptions::spec(),
+    )
+    .expect("optimize_spec");
+    assert_eq!(out.term, kconst(json!(2)));
+
+    // extract_best_spec on the saturated graph agrees.
+    let mut sat = eqsat::saturate(
+        std::slice::from_ref(&input),
+        set.laws(),
+        &eqsat::SaturateOptions::spec(),
+    )
+    .unwrap();
+    let best = eqsat::extract_best_spec(&mut sat.graph, sat.roots[0], &CostSpec::Size)
+        .expect("extract_best_spec");
+    assert_eq!(best, kconst(json!(2)));
+}
+
+// ---------------------------------------------------------------------------
+//  SearchEngine trait + the laws/*.json corpus
+// ---------------------------------------------------------------------------
+
+#[test]
+fn search_engine_trait_drives_the_corpus() {
+    use eqsat::SearchEngine as _;
+    let engine = eqsat::EGraphEngine;
+    assert_eq!(engine.name(), "eqsat");
+
+    let set = LawSet::from_json(include_str!("../laws/simplification.json")).unwrap();
+    assert_eq!(set.len(), builtin::simplification().len());
+    assert!(set.compile().is_ok());
+
+    let input = native_op(
+        "add",
+        vec![
+            native_op("mul", vec![kconst(json!(2)), kconst(json!(1))]),
+            kconst(json!(0)),
+        ],
+    );
+    let out = engine
+        .optimize(
+            &input,
+            &set,
+            &CostSpec::Size,
+            &eqsat::OptimizeOptions::spec(),
+        )
+        .expect("engine.optimize");
+    assert_eq!(out.term, kconst(json!(2)));
+
+    let sat = engine
+        .saturate(&[input], &set, &eqsat::SaturateOptions::spec())
+        .expect("engine.saturate");
+    assert_eq!(sat.roots.len(), 1);
+}
+
+#[test]
+fn laws_corpus_files_load_and_match_the_builtin_packs() {
+    // laws/simplification.json — the guard-free SIMPLIFICATION_RULES
+    // ports, as records.
+    let simpl = LawSet::from_json(include_str!("../laws/simplification.json")).unwrap();
+    let expected = builtin::simplification();
+    assert_eq!(simpl.laws(), expected.as_slice());
+
+    // laws/reshape_flatten.json — the attrs-bind demo.
+    let flat = LawSet::from_json(include_str!("../laws/reshape_flatten.json")).unwrap();
+    assert_eq!(flat.laws(), &[builtin::reshape_flatten()]);
+
+    // And the records re-serialize byte-stably through the codec.
+    for set in [simpl, flat] {
+        let reloaded = LawSet::from_data(&set.to_data()).unwrap();
+        assert_eq!(reloaded, set);
+    }
+}

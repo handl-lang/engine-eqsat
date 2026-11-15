@@ -1,0 +1,954 @@
+[
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Commutativity in a symmetric monoidal category: σ ∘ (f ⊗ g) = g ⊗ f.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "a"
+        },
+        {
+          "mvar": "b"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "add",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "comm_add",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "b"
+        },
+        {
+          "mvar": "a"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "add",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "expansive",
+      "symmetry"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Hadamard product is commutative (SMC symmetry).",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "a"
+        },
+        {
+          "mvar": "b"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "comm_mul",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "b"
+        },
+        {
+          "mvar": "a"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "expansive",
+      "symmetry"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Associativity of sequential composition in a category.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "a"
+        },
+        {
+          "args": [
+            {
+              "mvar": "b"
+            },
+            {
+              "mvar": "c"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "add",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "add",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "assoc_add",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "b"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "add",
+          "source": "native"
+        },
+        {
+          "mvar": "c"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "add",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "expansive",
+      "symmetry"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Associativity of parallel composition in a monoidal category.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "a"
+        },
+        {
+          "args": [
+            {
+              "mvar": "b"
+            },
+            {
+              "mvar": "c"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "mul",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "assoc_mul",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "b"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "mul",
+          "source": "native"
+        },
+        {
+          "mvar": "c"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "expansive",
+      "symmetry"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Additive identity: a + 0 = a.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "a"
+        },
+        {
+          "const": 0
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "add",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "id_add",
+    "rhs": {
+      "mvar": "a"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Multiplicative identity: a * 1 = a.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "a"
+        },
+        {
+          "const": 1
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "id_mul",
+    "rhs": {
+      "mvar": "a"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Double negation: ¬¬a = a (involution).",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "neg",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "neg",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "double_neg",
+    "rhs": {
+      "mvar": "a"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Subtraction as addition of inverse: a - b = a + (-b).",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "a"
+        },
+        {
+          "mvar": "b"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "sub",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "sub_to_add",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "a"
+        },
+        {
+          "args": [
+            {
+              "mvar": "b"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "neg",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "add",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "SiLU definition: silu(x) = x · σ(x).",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "x"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "silu",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "silu_expand",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "x"
+        },
+        {
+          "args": [
+            {
+              "mvar": "x"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "sigmoid",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "The manual-silu fold: x · σ(x) = silu(x) — the definitional inverse of silu_expand, and the mediating 3-cell of the silu_expand/silu_mul_form × swiglu_fuse critical pairs.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "x"
+        },
+        {
+          "args": [
+            {
+              "mvar": "x"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "sigmoid",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "silu_fold",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "x"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "silu",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "SwiGLU: silu(g)*u = (g*sigmoid(g))*u (factor for prefix sharing).",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "g"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "silu",
+          "source": "native"
+        },
+        {
+          "mvar": "u"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "silu_mul_form",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "g"
+            },
+            {
+              "args": [
+                {
+                  "mvar": "g"
+                }
+              ],
+              "attrs": null,
+              "dim": null,
+              "lit": null,
+              "op": "sigmoid",
+              "source": "native"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "mul",
+          "source": "native"
+        },
+        {
+          "mvar": "u"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "x / (|x| + 1) = softsign(x) — the bounded rational map, written as a three-op decomposed spelling, folds into the one kernel.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "x"
+        },
+        {
+          "args": [
+            {
+              "args": [
+                {
+                  "mvar": "x"
+                }
+              ],
+              "attrs": null,
+              "dim": null,
+              "lit": null,
+              "op": "abs",
+              "source": "native"
+            },
+            {
+              "const": 1
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "add",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "div",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "softsign_fold",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "x"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "softsign",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Self-composition: x² = x · x.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "x"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "square",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "square_expand",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "x"
+        },
+        {
+          "mvar": "x"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "pow(x, 2) ≡ square(x) ≡ x·x (SwiGLU/RMSNorm bridge).",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "x"
+        },
+        {
+          "const": 2
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "pow",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "pow_to_square",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "x"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "square",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "Reverse: square(x) ≡ pow(x, 2) for shape/cost reasons.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "x"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "square",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "square_to_pow",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "x"
+        },
+        {
+          "const": 2
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "pow",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "x·x = square(x): the mul spelling of x² folds to the unary kernel — the definitional inverse of square_expand.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "u"
+        },
+        {
+          "mvar": "u"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "mul_square",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "u"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "square",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "reciprocal(sqrt(x)) = rsqrt(x): the exported ``1/sqrt`` spelling — aten lowers scalar-over-tensor div to reciprocal — folds to the same canonical kernel.",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "u"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "sqrt",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "reciprocal",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "recip_sqrt_to_rsqrt",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "u"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "rsqrt",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": null,
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "(a/b)·c = (a·c)/b — pointwise div/mul naturality, exact for any broadcast (the decay-weighted score's scale slides out of the product).",
+    "lhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "b"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "div",
+          "source": "native"
+        },
+        {
+          "mvar": "c"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "mul",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "mul_div_swap",
+    "rhs": {
+      "args": [
+        {
+          "args": [
+            {
+              "mvar": "a"
+            },
+            {
+              "mvar": "c"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "mul",
+          "source": "native"
+        },
+        {
+          "mvar": "b"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "div",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  }
+]

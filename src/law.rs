@@ -1,23 +1,40 @@
 //! [`Law`] — a named rewrite rule in the [`crate::pat`] pattern
 //! language, compiled to the e-graph's internal [`Rewrite`].
 //!
-//! v1 laws are **unconditional**: the Python `cond.py` guard
-//! machinery (`check`/`derive`/`dspec`) has no kit-data spelling yet
-//! (spike §6 open question), so [`Law`] carries no hooks. When the
-//! guard-format decision lands, `check`/`derive` slots belong here.
+//! The law **record** is the JSON interchange format of design doc
+//! §1 (ADR-0177): [`Law::to_data`]/[`Law::from_data`] round-trip the
+//! `LAW_FORMAT = 2` record shape (`version`/`kind`/`name`/`law`/`lhs`/
+//! `rhs`/`cond`/`dspec`/`tags`/`derivation`/`cert`/`error_bound`/
+//! `bound_norm`/`serializable`/`missing_hooks`), mirroring
+//! `mlopt_core.laws.serialize`. Patterns are spelled in the [`Pat`]
+//! authoring view — never the compiled bridge encoding.
+//!
+//! Guards are **deferred**: `cond`/`dspec` are carried as raw JSON
+//! trees (stage-2's `cond`/`dspec` interpreter is not landed), so a
+//! law that has them loads but [`Law::compile`] refuses with
+//! [`LawError::GuardDeferred`] — firing without the side condition
+//! would be a silent weakening. Likewise `serializable: false` or a
+//! non-empty `missing_hooks` refuses with
+//! [`LawError::Unserializable`]: the record's honesty flags port
+//! verbatim and are honoured, not dropped.
 
 use std::collections::BTreeSet;
 
 use handl_egraph::Rewrite;
+use serde_json::Value;
 
-use crate::pat::{self, Ctx, Pat, Side, metavar_names, root_dim_var};
+use crate::pat::{self, Ctx, Pat, PatError, Side, metavar_names, root_dim_var};
+
+/// The law-record format version this codec reads and writes —
+/// `mlopt_core.laws.serialize.LAW_FORMAT`.
+pub const LAW_FORMAT: u64 = 2;
 
 /// A rewrite law: `lhs -> rhs` over kernel-`Term` patterns.
 ///
 /// `name` is the rule's unique identity (budget key + provenance);
 /// `law` is the optional certificate/law-bank name it discharges
 /// (metadata, carried through to `Rewrite::law`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Law {
     /// Rule name — must be unique within a rule set.
     pub name: String,
@@ -30,14 +47,60 @@ pub struct Law {
     /// Intrinsic classification tags (symmetry / expansive / fusion /
     /// …) — domain metadata carried opaquely, like `Rewrite::tags`.
     pub tags: BTreeSet<String>,
+    /// The `cond` side-condition tree, **deferred**: carried as the
+    /// raw JSON the record stores, interpreted by the stage-2 guard
+    /// port. `Some` refuses [`Law::compile`] with
+    /// [`LawError::GuardDeferred`] — never silently dropped.
+    pub cond: Option<Value>,
+    /// The `dspec` derive-spec tree, deferred like [`Law::cond`].
+    pub dspec: Option<Value>,
+    /// The recorded derivation chain (record-level provenance — the
+    /// `Rewrite` carries no such field; it round-trips through the
+    /// record only).
+    pub derivation: Vec<String>,
+    /// An optional replayable-certificate record, carried opaquely —
+    /// record-level provenance, never folded into the 2-cell (the
+    /// `cert_to_data` posture of `law_from_data`).
+    pub cert: Option<Value>,
+    /// Bounded-error axis (ε-laws): `‖lhs − rhs‖ ≤ error_bound` in
+    /// the norm named by [`Law::bound_norm`]. `None` for exact rules.
+    pub error_bound: Option<f64>,
+    /// The norm `error_bound` is measured in (e.g. `"spectral"`).
+    pub bound_norm: String,
+    /// Whether the record round-trips behaviourally — `false` when
+    /// procedural `check=`/`derive=` hooks could not be folded into
+    /// `cond`/`dspec` (the `missing_hooks` honesty boundary). A
+    /// non-serializable law may be inspected but must not fire
+    /// silently: [`Law::compile`] refuses it.
+    pub serializable: bool,
+    /// Names of hooks the record cannot carry (`"check"`/`"derive"`).
+    pub missing_hooks: BTreeSet<String>,
 }
 
-/// Why a [`Law`] failed to compile.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Why a [`Law`] failed to compile or decode.
+#[derive(Clone, Debug, PartialEq)]
 pub enum LawError {
     /// The RHS mentions a metavariable the LHS never binds — the
     /// rewrite could not instantiate it.
     UnboundRhsVar(String),
+    /// The law carries a `cond`/`dspec` guard as deferred data and
+    /// the stage-1 interpreter does not exist — firing would silently
+    /// drop the side condition.
+    GuardDeferred {
+        /// The law's name.
+        law: String,
+        /// Which deferred field is present (`"cond"`/`"dspec"`).
+        field: &'static str,
+    },
+    /// The record flagged itself non-serializable (`serializable:
+    /// false` or non-empty `missing_hooks`) — procedural hooks the
+    /// data cannot carry; firing would silently weaken the law.
+    Unserializable {
+        /// The law's name.
+        law: String,
+        /// The hooks the record names as missing.
+        missing: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for LawError {
@@ -46,11 +109,125 @@ impl std::fmt::Display for LawError {
             LawError::UnboundRhsVar(name) => {
                 write!(f, "RHS metavariable '{name}' is not bound by the LHS")
             }
+            LawError::GuardDeferred { law, field } => write!(
+                f,
+                "law '{law}' carries a deferred {field} guard — no stage-1 interpreter"
+            ),
+            LawError::Unserializable { law, missing } => write!(
+                f,
+                "law '{law}' is not serializable (missing hooks: {})",
+                missing.join(", ")
+            ),
         }
     }
 }
 
 impl std::error::Error for LawError {}
+
+/// Why a law **record** failed to decode — distinct from
+/// [`LawError`], which covers compile-time refusals.
+#[derive(Debug)]
+pub enum RecordError {
+    /// The input was not valid JSON.
+    Json(serde_json::Error),
+    /// The top-level value is not a law record (or, for set loaders,
+    /// an array/object of records).
+    Shape(String),
+    /// `version` is absent or not [`LAW_FORMAT`].
+    Version(Option<u64>),
+    /// `kind` is present and not `"law"`.
+    Kind(String),
+    /// A required field is missing or has the wrong type.
+    Malformed(String),
+    /// A `lhs`/`rhs`/`dim` pattern failed to decode.
+    Pattern {
+        /// Which pattern position failed (`"lhs"`, `"rhs"`, `"dim"`).
+        side: &'static str,
+        /// The underlying pattern error.
+        source: PatError,
+    },
+    /// A law record inside a [`crate::lawset::LawSet`] failed; `index`
+    /// is its position in the array.
+    SetMember {
+        /// Zero-based position in the record array.
+        index: usize,
+        /// The record's `name`, when it decoded far enough to have one.
+        name: Option<String>,
+        /// The underlying record error.
+        source: Box<RecordError>,
+    },
+}
+
+impl std::fmt::Display for RecordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecordError::Json(e) => write!(f, "invalid JSON: {e}"),
+            RecordError::Shape(desc) => write!(f, "bad record shape: {desc}"),
+            RecordError::Version(v) => {
+                write!(f, "bad law record version: {v:?} (expected {LAW_FORMAT})")
+            }
+            RecordError::Kind(k) => write!(f, "unknown object kind: {k:?}"),
+            RecordError::Malformed(msg) => write!(f, "malformed law record: {msg}"),
+            RecordError::Pattern { side, source } => {
+                write!(f, "bad {side} pattern: {source}")
+            }
+            RecordError::SetMember {
+                index,
+                name,
+                source,
+            } => match name {
+                Some(n) => write!(f, "law record {index} ({n}): {source}"),
+                None => write!(f, "law record {index}: {source}"),
+            },
+        }
+    }
+}
+
+impl std::error::Error for RecordError {}
+
+impl From<serde_json::Error> for RecordError {
+    fn from(e: serde_json::Error) -> Self {
+        RecordError::Json(e)
+    }
+}
+
+/// Fetch a required string field.
+fn req_str<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<&'a str, RecordError> {
+    obj.get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| RecordError::Malformed(format!("\"{field}\" must be a string")))
+}
+
+/// Fetch an optional string-or-null field.
+fn opt_str(obj: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
+    obj.get(field).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Fetch an optional JSON array-of-strings field (`null`/absent →
+/// `None`; a non-array or non-string element is a [`RecordError`]).
+fn opt_str_list(
+    obj: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<Vec<String>>, RecordError> {
+    match obj.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| RecordError::Malformed(format!("\"{field}\" must be strings")))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err(RecordError::Malformed(format!(
+            "\"{field}\" must be an array of strings"
+        ))),
+    }
+}
 
 impl Law {
     /// A law `name: lhs -> rhs` with no law metadata or tags.
@@ -61,6 +238,14 @@ impl Law {
             lhs,
             rhs,
             tags: BTreeSet::new(),
+            cond: None,
+            dspec: None,
+            derivation: Vec::new(),
+            cert: None,
+            error_bound: None,
+            bound_norm: "spectral".to_string(),
+            serializable: true,
+            missing_hooks: BTreeSet::new(),
         }
     }
 
@@ -76,13 +261,222 @@ impl Law {
         self
     }
 
+    /// Carry a deferred `cond` guard tree (raw record JSON — the
+    /// stage-2 interpreter reads it; [`Law::compile`] refuses while
+    /// set).
+    pub fn with_cond(mut self, cond: impl Into<Value>) -> Law {
+        self.cond = Some(cond.into());
+        self
+    }
+
+    /// Carry a deferred `dspec` derive-spec tree (see
+    /// [`Law::with_cond`]).
+    pub fn with_dspec(mut self, dspec: impl Into<Value>) -> Law {
+        self.dspec = Some(dspec.into());
+        self
+    }
+
+    /// Append a derivation-chain entry (record-level provenance).
+    pub fn with_derivation(mut self, step: impl Into<String>) -> Law {
+        self.derivation.push(step.into());
+        self
+    }
+
+    /// Attach an opaque certificate record (record-level provenance —
+    /// never folded into the 2-cell).
+    pub fn with_cert(mut self, cert: impl Into<Value>) -> Law {
+        self.cert = Some(cert.into());
+        self
+    }
+
+    /// Mark as an ε-law: `‖lhs − rhs‖ ≤ bound` in `bound_norm`.
+    pub fn with_error_bound(mut self, bound: f64, norm: impl Into<String>) -> Law {
+        self.error_bound = Some(bound);
+        self.bound_norm = norm.into();
+        self
+    }
+
+    /// Encode this law as its `LAW_FORMAT = 2` JSON record — the
+    /// shape `mlopt_core.laws.serialize.law_to_data` emits, with the
+    /// pattern pair in the [`Pat`] authoring view.
+    ///
+    /// `cond`/`dspec` round-trip as the raw deferred trees;
+    /// `serializable`/`missing_hooks` port verbatim.
+    pub fn to_data(&self) -> Value {
+        let mut rec = serde_json::Map::new();
+        rec.insert("version".to_string(), Value::from(LAW_FORMAT));
+        rec.insert("kind".to_string(), Value::from("law"));
+        rec.insert("name".to_string(), Value::from(self.name.as_str()));
+        rec.insert(
+            "law".to_string(),
+            match &self.law {
+                Some(l) => Value::from(l.as_str()),
+                None => Value::Null,
+            },
+        );
+        rec.insert("lhs".to_string(), self.lhs.to_data());
+        rec.insert("rhs".to_string(), self.rhs.to_data());
+        rec.insert("cond".to_string(), self.cond.clone().unwrap_or(Value::Null));
+        rec.insert(
+            "dspec".to_string(),
+            self.dspec.clone().unwrap_or(Value::Null),
+        );
+        rec.insert(
+            "tags".to_string(),
+            Value::Array(self.tags.iter().map(|t| Value::from(t.as_str())).collect()),
+        );
+        rec.insert(
+            "derivation".to_string(),
+            Value::Array(
+                self.derivation
+                    .iter()
+                    .map(|d| Value::from(d.as_str()))
+                    .collect(),
+            ),
+        );
+        rec.insert("cert".to_string(), self.cert.clone().unwrap_or(Value::Null));
+        rec.insert(
+            "error_bound".to_string(),
+            match self.error_bound {
+                Some(b) => serde_json::Number::from_f64(b)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
+                None => Value::Null,
+            },
+        );
+        rec.insert(
+            "bound_norm".to_string(),
+            Value::from(self.bound_norm.as_str()),
+        );
+        rec.insert("serializable".to_string(), Value::from(self.serializable));
+        rec.insert(
+            "missing_hooks".to_string(),
+            Value::Array(
+                self.missing_hooks
+                    .iter()
+                    .map(|h| Value::from(h.as_str()))
+                    .collect(),
+            ),
+        );
+        Value::Object(rec)
+    }
+
+    /// Decode a [`Law`] from its record form (see [`Law::to_data`]).
+    ///
+    /// `cond`/`dspec` are stored **deferred** — the record's guard
+    /// trees are preserved verbatim for the stage-2 interpreter and
+    /// surface at [`Law::compile`] as [`LawError::GuardDeferred`].
+    /// `serializable`/`missing_hooks` are honoured: a flagged record
+    /// loads (for inspection) but refuses to compile.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError`] on a bad version/kind, missing or mistyped
+    /// field, or a malformed `lhs`/`rhs` pattern.
+    pub fn from_data(value: &Value) -> Result<Law, RecordError> {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| RecordError::Shape(format!("{value}")))?;
+        let version = obj.get("version").and_then(Value::as_u64);
+        if version != Some(LAW_FORMAT) {
+            return Err(RecordError::Version(version));
+        }
+        if let Some(kind) = obj.get("kind").and_then(Value::as_str)
+            && kind != "law"
+        {
+            return Err(RecordError::Kind(kind.to_string()));
+        }
+        let name = req_str(obj, "name")?.to_string();
+        let law = opt_str(obj, "law");
+        let lhs = Pat::from_data(
+            obj.get("lhs")
+                .ok_or_else(|| RecordError::Malformed("\"lhs\" is required".into()))?,
+        )
+        .map_err(|source| RecordError::Pattern {
+            side: "lhs",
+            source,
+        })?;
+        let rhs = Pat::from_data(
+            obj.get("rhs")
+                .ok_or_else(|| RecordError::Malformed("\"rhs\" is required".into()))?,
+        )
+        .map_err(|source| RecordError::Pattern {
+            side: "rhs",
+            source,
+        })?;
+        let tags = opt_str_list(obj, "tags")?
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let derivation = opt_str_list(obj, "derivation")?.unwrap_or_default();
+        let missing_hooks = opt_str_list(obj, "missing_hooks")?
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let error_bound = match obj.get("error_bound") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v.as_f64().ok_or_else(|| {
+                RecordError::Malformed("\"error_bound\" must be a number".into())
+            })?),
+        };
+        Ok(Law {
+            name,
+            law,
+            lhs,
+            rhs,
+            tags,
+            cond: obj.get("cond").filter(|v| !v.is_null()).cloned(),
+            dspec: obj.get("dspec").filter(|v| !v.is_null()).cloned(),
+            derivation,
+            cert: obj.get("cert").filter(|v| !v.is_null()).cloned(),
+            error_bound,
+            bound_norm: opt_str(obj, "bound_norm").unwrap_or_else(|| "spectral".to_string()),
+            serializable: obj
+                .get("serializable")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            missing_hooks,
+        })
+    }
+
+    /// Decode a [`Law`] from a JSON record (see [`Law::from_data`]).
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::Json`] on unparsable input, else whatever
+    /// [`Law::from_data`] reports.
+    pub fn from_json(text: &str) -> Result<Law, RecordError> {
+        let value: Value = serde_json::from_str(text)?;
+        Law::from_data(&value)
+    }
+
     /// Compile to the e-graph's internal [`Rewrite`].
     ///
     /// # Errors
     ///
-    /// [`LawError::UnboundRhsVar`] when the RHS names a metavariable
-    /// (term or attr) absent from the LHS.
-    pub(crate) fn compile(&self) -> Result<Rewrite, LawError> {
+    /// * [`LawError::Unserializable`] — the record flagged procedural
+    ///   hooks the data cannot carry (`serializable: false` or
+    ///   `missing_hooks` non-empty).
+    /// * [`LawError::GuardDeferred`] — `cond`/`dspec` is present as
+    ///   deferred data; the stage-1 interpreter does not exist, so
+    ///   firing would silently drop the side condition.
+    /// * [`LawError::UnboundRhsVar`] — the RHS names a metavariable
+    ///   (term or attr) absent from the LHS.
+    pub fn compile(&self) -> Result<Rewrite, LawError> {
+        if !self.serializable || !self.missing_hooks.is_empty() {
+            return Err(LawError::Unserializable {
+                law: self.name.clone(),
+                missing: self.missing_hooks.iter().cloned().collect(),
+            });
+        }
+        for (field, guard) in [("cond", &self.cond), ("dspec", &self.dspec)] {
+            if guard.is_some() {
+                return Err(LawError::GuardDeferred {
+                    law: self.name.clone(),
+                    field,
+                });
+            }
+        }
         let mut lhs_vars = BTreeSet::new();
         metavar_names(&self.lhs, &mut lhs_vars);
         let mut rhs_vars = BTreeSet::new();
@@ -103,6 +497,18 @@ impl Law {
         );
         rule.law = self.law.clone().unwrap_or_else(|| self.name.clone());
         rule.tags = self.tags.clone();
+        rule.error_bound = self.error_bound;
+        rule.bound_norm = self.bound_norm.clone();
         Ok(rule)
     }
+}
+
+/// Decode a [`Law`] from its record form — module-level spelling of
+/// [`Law::from_data`] (design doc §1's `law::from_data`).
+///
+/// # Errors
+///
+/// [`RecordError`] — see [`Law::from_data`].
+pub fn from_data(value: &Value) -> Result<Law, RecordError> {
+    Law::from_data(value)
 }
