@@ -16,7 +16,10 @@
 //!   op" is a `Term::Op` carrying the bridge's `source` attr (the same
 //!   `sourced` test `term_bridge::to_kernel` uses); `Leaf` terms
 //!   decode through `to_kernel` for the `Const` reads (`const`,
-//!   `const-num`, `const-cmp`, the `("const", T)` expr).
+//!   `const-num`, `const-cmp`, the `("const", T)` expr) — except
+//!   `__mlopt_leaf__:` bridge strings, which are `Var`/`Param` leaves
+//!   and decline every const read (cond.py's `isinstance(t, Const)`
+//!   is `False` for them; see `crate::shape::is_bridge_leaf`).
 //! * Attr predicates: `attr-is`, `attr-eq`, `attr-in`, `attr-type`,
 //!   `attr-len`, `attr-eq-attr`, `attr-cmp`, `attr-ints` — read
 //!   [`BoundEnv::attrs`] (bare names; the Python `"$attr:"` key
@@ -378,13 +381,24 @@ impl TermRef {
 
 /// The `.value` of a bound `Const` leaf — `getattr(t, "value",
 /// None)`: only a `Term::Leaf` decoding to `KernelTerm::Const`
-/// answers; every other term shape declines.
+/// answers; every other term shape declines. A `__mlopt_leaf__:`
+/// bridge string is a `Var`/`Param` leaf, *not* a `Const` — the
+/// kernel wire has no variable leaf, so the mlopt-search bridge
+/// encodes them as `Const` strings, but cond.py's
+/// `isinstance(t, Const)` is `False` for `Var`/`Param` (they carry
+/// no `.value`). Decline on the prefix, exactly like a non-`Const`
+/// term.
 fn const_value(t: &Term) -> Option<V> {
     if !matches!(t, Term::Leaf(_)) {
         return None;
     }
     match to_kernel(t) {
-        KernelTerm::Const { value } => Some(V::from_json(&value)),
+        KernelTerm::Const { value } => {
+            if crate::shape::is_bridge_leaf(&value) {
+                return None;
+            }
+            Some(V::from_json(&value))
+        }
         _ => None,
     }
 }
@@ -2111,6 +2125,72 @@ mod tests {
         assert!(!eval_cond(json!(["term-eq", "u", "v"]), &e));
         assert!(eval_cond(json!(["term-eq", "missing", "missing2"]), &e));
         assert!(!eval_cond(json!(["term-eq", "u", "missing"]), &e));
+    }
+
+    #[test]
+    fn bridge_leaf_is_not_a_const() {
+        // The mlopt-search bridge encodes `Var`/`Param` leaves as
+        // `Const` *strings* `__mlopt_leaf__:{"k":…,"n":…,"s":…}`
+        // (`mlopt_orchestrator.eqsat._LEAF_PREFIX`). On the Python
+        // side `Var`/`Param` are not `Const` nodes, so cond.py's
+        // `("const", T)` / `const-num` / `const-cmp` all read them as
+        // non-consts — the guard layer must not treat the payload
+        // string as a `.value`.
+        let var_leaf = konst(json!(
+            "__mlopt_leaf__:{\"k\":\"var\",\"n\":\"x\",\"s\":[2,3]}"
+        ));
+        let param_leaf = konst(json!(
+            "__mlopt_leaf__:{\"k\":\"param\",\"n\":\"w\",\"s\":null}"
+        ));
+        // A matched-but-malformed payload is still a leaf — the
+        // prefix alone classifies (honest decline, never a guess).
+        let bad_leaf = konst(json!("__mlopt_leaf__:{not json"));
+        // A genuine string Const (no prefix) stays a Const — kernel
+        // `Const` values are wider than mlopt's int|float.
+        let str_const = konst(json!("plain"));
+        let e = env(
+            &[
+                ("v", var_leaf.clone()),
+                ("p", param_leaf.clone()),
+                ("b", bad_leaf.clone()),
+                ("s", str_const.clone()),
+                ("c", konst(json!(7))),
+            ],
+            &[],
+        );
+
+        // `("const", T)` / `const-num` / `const-cmp` — the leaf
+        // payloads are leaves, not Consts: every const read declines.
+        for name in ["v", "p", "b"] {
+            assert!(!eval_cond(json!(["const", name]), &e), "{name}");
+            assert!(!eval_cond(json!(["const-num", name]), &e), "{name}");
+            assert!(
+                !eval_cond(json!(["const-cmp", name, "==", "x"]), &e),
+                "{name}"
+            );
+            // The `("const", T)` derive expr declines (Python's
+            // `_d_const` raises `_Decline` — Var has no `.value`).
+            assert!(eval_expr(json!(["const", name]), &e).is_none(), "{name}");
+            // …and so does anything built on it.
+            assert!(
+                eval_expr(json!(["float", ["const", name]]), &e).is_none(),
+                "{name}"
+            );
+            // `leaf` still holds — a leaf is not a kernel op.
+            assert!(eval_cond(json!(["leaf", name]), &e), "{name}");
+        }
+        // Genuine Consts are unaffected; a non-prefixed string Const
+        // is still a Const leaf (only the bridge prefix is reserved).
+        assert!(eval_cond(json!(["const", "c"]), &e));
+        assert!(eval_cond(json!(["const-num", "c"]), &e));
+        assert!(eval_cond(json!(["const", "s"]), &e));
+        assert!(!eval_cond(json!(["const-num", "s"]), &e)); // "plain" not numeric
+        // term-eq: leaf payloads compare by their full encoding —
+        // var vs param vs const all distinct, self-equal.
+        assert!(eval_cond(json!(["term-eq", "v", "v"]), &e));
+        assert!(!eval_cond(json!(["term-eq", "v", "p"]), &e));
+        assert!(!eval_cond(json!(["term-eq", "v", "c"]), &e));
+        assert!(!eval_cond(json!(["term-eq", "v", "s"]), &e));
     }
 
     #[test]

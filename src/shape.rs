@@ -2117,7 +2117,18 @@ fn leaf_info(key: &str) -> TensorInfo {
 /// pad laws fired on real `(4,6)` operands and extraction produced
 /// `mul(a, unsqueeze(b, -1))`, a term that cannot materialise
 /// (`4` vs `6` at dim 1).
-const MLOPT_LEAF_PREFIX: &str = "__mlopt_leaf__:";
+pub(crate) const MLOPT_LEAF_PREFIX: &str = "__mlopt_leaf__:";
+
+/// Whether `v` is a `__mlopt_leaf__:` bridge-leaf string — the
+/// `Var`/`Param` encoding. These are *leaves*, not `Const`s:
+/// cond.py's `isinstance(t, Const)` is `False` for `Var`/`Param`, so
+/// the guard layer's const reads ([`crate::guard`]) must decline on
+/// them even though they arrive as `Const`-shaped wire leaves. The
+/// prefix alone classifies — a matched-but-malformed payload is
+/// still a leaf (honest decline, never a guess).
+pub(crate) fn is_bridge_leaf(v: &Value) -> bool {
+    v.as_str().is_some_and(|s| s.starts_with(MLOPT_LEAF_PREFIX))
+}
 
 /// Decode a `__mlopt_leaf__:` payload's declared shape.  `Some` iff
 /// `v` is a string carrying the prefix — a matched-but-malformed
