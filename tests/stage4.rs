@@ -565,3 +565,102 @@ fn stage4_corpus_files_load_and_match_builtin_packs() {
         assert_eq!(reloaded, set);
     }
 }
+
+// ---------------------------------------------------------------------------
+//  WP4 F2 — the `__tuple__`/`__list__` wire envelopes
+// ---------------------------------------------------------------------------
+
+/// The canonical `simplification` record's `softmax_fold` must fire
+/// on the spelling a real `attr_to_data` lift produces:
+/// `sum(dim=("-1",))` arrives as `{"__tuple__": [-1]}`, and the
+/// record's `attr-type "tuple"`/`attr-len`/`attr0` guard reads it.
+/// Before the envelope decode this declined every time.
+#[test]
+fn kit_softmax_fold_fires_on_wire_tuple_dim() {
+    let set = LawSet::from_json(pack("simplification")).unwrap();
+    let u = shaped(&[2, 4]);
+    let manual = op(
+        "div",
+        vec![
+            op("exp", vec![u.clone()]),
+            op_attrs(
+                "sum",
+                vec![op("exp", vec![u])],
+                json!({"dim": {"__tuple__": [-1]}, "keepdim": true}),
+            ),
+        ],
+    );
+    assert_fired(&manual, &law_named(set.laws().to_vec(), "softmax_fold"));
+}
+
+/// …and must *not* fire on `{"__list__": [-1]}`: Python's
+/// `isinstance(dim, tuple)` is False for a list, so both cond arms
+/// decline — verified-or-declined, not approximated.
+#[test]
+fn kit_softmax_fold_declines_on_wire_list_dim() {
+    let set = LawSet::from_json(pack("simplification")).unwrap();
+    let u = shaped(&[2, 4]);
+    let manual = op(
+        "div",
+        vec![
+            op("exp", vec![u.clone()]),
+            op_attrs(
+                "sum",
+                vec![op("exp", vec![u])],
+                json!({"dim": {"__list__": [-1]}, "keepdim": true}),
+            ),
+        ],
+    );
+    assert_no_fire(&manual, &law_named(set.laws().to_vec(), "softmax_fold"));
+}
+
+/// `gqa_absorb_repeat`'s `repeat-chain`/`repeat-heads` guards read
+/// the `expand`/`reshape` `shape` attrs as int tuples — a lifted
+/// term carries those as `__tuple__` envelopes.
+#[test]
+fn gqa_absorb_repeat_fires_on_wire_tuple_shapes() {
+    let q = shaped(&[2, 4, 6, 8]);
+    let k = shaped(&[2, 4, 3, 8]);
+    let v = shaped(&[2, 4, 3, 8]);
+    // repeat_head, but with the `shape` attrs spelled as the wire
+    // envelope instead of a bare array.
+    let head = |t: &KTerm, ud: i64, es: serde_json::Value, rs: serde_json::Value| {
+        op_attrs(
+            "transpose",
+            vec![op_attrs(
+                "reshape",
+                vec![op_attrs(
+                    "expand",
+                    vec![op_attrs("unsqueeze", vec![t.clone()], json!({"dim": ud}))],
+                    json!({"shape": es}),
+                )],
+                json!({"shape": rs}),
+            )],
+            json!({"dim0": 1, "dim1": 2}),
+        )
+    };
+    let input = op_attrs(
+        "sdpa",
+        vec![
+            op_attrs("transpose", vec![q], json!({"dim0": 1, "dim1": 2})),
+            head(
+                &k,
+                3,
+                json!({"__tuple__": [2, 4, 3, 2, 8]}),
+                json!({"__tuple__": [2, 4, 6, 8]}),
+            ),
+            head(
+                &v,
+                3,
+                json!({"__tuple__": [2, 4, 3, 2, 8]}),
+                json!({"__tuple__": [2, 4, 6, 8]}),
+            ),
+        ],
+        json!({"dropout_p": 0.0, "is_causal": false}),
+    );
+    let laws = LawSet::from_json(pack("categorical"))
+        .unwrap()
+        .laws()
+        .to_vec();
+    assert_fired(&input, &law_named(laws, "gqa_absorb_repeat"));
+}

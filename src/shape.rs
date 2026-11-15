@@ -302,13 +302,35 @@ fn av_int(v: &AttrValue) -> Option<i64> {
     }
 }
 
+/// The mlopt attr wire envelopes — `mlopt_core.ir.attr_to_data`'s
+/// `{"__tuple__": […]}` / `{"__list__": […]}` encoding of Python
+/// `tuple`/`list` attr values. Every shape read below admits
+/// Python's `isinstance(x, (tuple, list))` union interchangeably,
+/// so both envelopes — and a bare `Array` (the port's tuple normal
+/// form, e.g. a dspec-derived attr before re-encoding) — yield the
+/// same item view. `None` for anything else, including a marker key
+/// with a non-array payload or a multi-key map.
+fn seq_items(v: &AttrValue) -> Option<&[AttrValue]> {
+    match v {
+        AttrValue::Array(items) => Some(items),
+        AttrValue::Object(map) if map.len() == 1 => {
+            if let Some(AttrValue::Array(items)) = map.get("__tuple__") {
+                Some(items)
+            } else if let Some(AttrValue::Array(items)) = map.get("__list__") {
+                Some(items)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// `AttrValue` → int tuple under the `isinstance(dim, (tuple, list))`
 /// contract — a non-int *element* fails the whole read (Python's
 /// `all(isinstance(d, int))` gates).
 fn av_ints(v: &AttrValue) -> Option<Vec<i64>> {
-    let AttrValue::Array(items) = v else {
-        return None;
-    };
+    let items = seq_items(v)?;
     items.iter().map(av_int).collect()
 }
 
@@ -318,9 +340,7 @@ fn av_ints(v: &AttrValue) -> Option<Vec<i64>> {
 /// the honest analog — a metavar string is "not yet known", never a
 /// fabricated dim).
 fn attr_dims(v: &AttrValue) -> Option<Vec<Dim>> {
-    let AttrValue::Array(items) = v else {
-        return None;
-    };
+    let items = seq_items(v)?;
     Some(
         items
             .iter()
@@ -335,7 +355,13 @@ fn attr_dims(v: &AttrValue) -> Option<Vec<Dim>> {
 }
 
 /// Python `bool(attr)` truthiness for `keepdim`/`or`-default flags.
+/// Sequences read through the wire envelopes first —
+/// `{"__tuple__": []}` is the empty tuple, falsy like Python's `()`,
+/// not a non-empty object.
 fn av_truthy(v: &AttrValue) -> bool {
+    if let Some(items) = seq_items(v) {
+        return !items.is_empty();
+    }
     match v {
         AttrValue::Null => false,
         AttrValue::Bool(b) => *b,
@@ -343,7 +369,7 @@ fn av_truthy(v: &AttrValue) -> bool {
         AttrValue::UInt(n) => *n != 0,
         AttrValue::Float(f) => *f != 0.0,
         AttrValue::Str(s) => !s.is_empty(),
-        AttrValue::Array(a) => !a.is_empty(),
+        AttrValue::Array(_) => unreachable!("seq_items covers Array"),
         AttrValue::Object(o) => !o.is_empty(),
     }
 }
@@ -352,8 +378,10 @@ fn av_truthy(v: &AttrValue) -> bool {
 /// element, else the value itself.
 fn conv_scalar(v: Option<&AttrValue>) -> Option<AttrValue> {
     match v {
-        Some(AttrValue::Array(a)) if !a.is_empty() => a.first().cloned(),
-        Some(other) => Some(other.clone()),
+        Some(v) => match seq_items(v) {
+            Some([first, ..]) => Some(first.clone()),
+            _ => Some(v.clone()),
+        },
         None => None,
     }
 }
@@ -362,9 +390,11 @@ fn conv_scalar(v: Option<&AttrValue>) -> Option<AttrValue> {
 /// malformed (non-pair sequence).
 fn conv_pair(v: Option<&AttrValue>) -> (Option<AttrValue>, Option<AttrValue>) {
     match v {
-        Some(AttrValue::Array(a)) if a.len() == 2 => (Some(a[0].clone()), Some(a[1].clone())),
-        Some(AttrValue::Array(_)) => (None, None),
-        Some(other) => (Some(other.clone()), Some(other.clone())),
+        Some(v) => match seq_items(v) {
+            Some([a, b]) => (Some(a.clone()), Some(b.clone())),
+            Some(_) => (None, None),
+            None => (Some(v.clone()), Some(v.clone())),
+        },
         None => (None, None),
     }
 }
@@ -580,8 +610,8 @@ fn index_shape(o: &Op, shapes: &[Shape]) -> Shape {
     }
     // `layout`: one flag per key position. Absent or empty → the
     // `x[i]` spelling (every index operand on the leading axes).
-    let layout: Vec<bool> = match attr_of(o, &["layout"]) {
-        Some(AttrValue::Array(flags)) if !flags.is_empty() => flags.iter().map(av_truthy).collect(),
+    let layout: Vec<bool> = match attr_of(o, &["layout"]).and_then(seq_items) {
+        Some(flags) if !flags.is_empty() => flags.iter().map(av_truthy).collect(),
         _ => vec![true; idx_shapes.len()],
     };
     let consumed = layout.len().min(base.len());
@@ -917,15 +947,9 @@ fn reduce_shape(o: &Op, shapes: &[Shape]) -> Shape {
         // `()` case: unknown, never scalar.
         return Shape::Unknown;
     }
-    let dims: Vec<i64> = match dim {
-        AttrValue::Array(_) => match av_ints(dim) {
-            Some(d) => d,
-            None => return Shape::Unknown,
-        },
-        other => match av_int(other) {
-            Some(d) => vec![d],
-            None => return Shape::Unknown,
-        },
+    let dims: Vec<i64> = match av_ints(dim).or_else(|| av_int(dim).map(|d| vec![d])) {
+        Some(d) => d,
+        None => return Shape::Unknown,
     };
     let ndim = base.len() as i64;
     let norm: BTreeSet<i64> = dims.iter().map(|d| d.rem_euclid(ndim)).collect();
@@ -1081,25 +1105,27 @@ fn repeat_shape(o: &Op, shapes: &[Shape]) -> Shape {
     };
     let rep = match attr_of(o, &["shape", "repeats"]) {
         None => return Shape::Tuple(base),
-        Some(AttrValue::Array(items)) => {
-            if items.is_empty() {
-                return Shape::Tuple(base);
-            }
-            let mut out = Vec::with_capacity(items.len());
-            for it in items.iter() {
-                match it {
-                    AttrValue::Int(n) => out.push(Some(*n)),
-                    AttrValue::UInt(n) => match i64::try_from(*n) {
-                        Ok(n) => out.push(Some(n)),
-                        Err(_) => return Shape::Unknown,
-                    },
-                    AttrValue::Null => out.push(None),
-                    _ => return Shape::Unknown,
+        Some(v) => match seq_items(v) {
+            Some(items) => {
+                if items.is_empty() {
+                    return Shape::Tuple(base);
                 }
+                let mut out = Vec::with_capacity(items.len());
+                for it in items.iter() {
+                    match it {
+                        AttrValue::Int(n) => out.push(Some(*n)),
+                        AttrValue::UInt(n) => match i64::try_from(*n) {
+                            Ok(n) => out.push(Some(n)),
+                            Err(_) => return Shape::Unknown,
+                        },
+                        AttrValue::Null => out.push(None),
+                        _ => return Shape::Unknown,
+                    }
+                }
+                out
             }
-            out
-        }
-        Some(_) => return Shape::Tuple(base),
+            None => return Shape::Tuple(base),
+        },
     };
     if rep.len() < base.len() {
         // torch requires len(reps) >= ndim — malformed; report base.
@@ -1135,7 +1161,7 @@ fn permute_shape(o: &Op, shapes: &[Shape]) -> Shape {
         return reversed();
     };
     let Some(dims) = av_ints(v) else {
-        return if matches!(v, AttrValue::Array(_)) {
+        return if seq_items(v).is_some() {
             Shape::Unknown
         } else {
             reversed()
@@ -1315,10 +1341,7 @@ fn index_select_shape(o: &Op, shapes: &[Shape]) -> Shape {
             None => return Shape::Unknown,
         },
     };
-    let idx_len = attr_of(o, &["index"]).and_then(|v| match v {
-        AttrValue::Array(a) => Some(a.len() as i64),
-        _ => None,
-    });
+    let idx_len = attr_of(o, &["index"]).and_then(|v| seq_items(v).map(|a| a.len() as i64));
     let mut out = base.clone();
     out[d.rem_euclid(base.len() as i64) as usize] = idx_len;
     Shape::Tuple(out)
@@ -1403,7 +1426,7 @@ fn pad_shape(o: &Op, shapes: &[Shape]) -> Shape {
     if base.is_empty() {
         return Shape::Unknown;
     }
-    let Some(AttrValue::Array(pads)) = attr_of(o, &["pad"]) else {
+    let Some(pads) = attr_of(o, &["pad"]).and_then(seq_items) else {
         return Shape::Tuple(base.clone());
     };
     if pads.is_empty() {
@@ -1556,8 +1579,8 @@ fn tensor_split_shape(o: &Op, shapes: &[Shape]) -> Shape {
                 }
                 out[nd] = base[nd].map(|b| (b + n - 1) / n);
             }
-            None => match v {
-                AttrValue::Array(bounds) => {
+            None => match seq_items(v) {
+                Some(bounds) => {
                     let ints: Option<Vec<i64>> = bounds.iter().map(av_int).collect();
                     out[nd] = match (ints, base[nd]) {
                         (Some(v), Some(bd)) => {
@@ -1811,14 +1834,16 @@ fn split_shape(o: &Op, shapes: &[Shape]) -> Shape {
     let nd = d.rem_euclid(base.len() as i64) as usize;
     let mut out = base.clone();
     out[nd] = match attr_of(o, &["sizes", "split_size"]) {
-        Some(AttrValue::Array(a)) => {
-            let ints: Option<Vec<i64>> = a.iter().map(av_int).collect();
-            match ints {
-                Some(v) if (idx as usize) < v.len() => Some(v[idx as usize]),
-                _ => None,
+        Some(v) => match seq_items(v) {
+            Some(a) => {
+                let ints: Option<Vec<i64>> = a.iter().map(av_int).collect();
+                match ints {
+                    Some(v) if (idx as usize) < v.len() => Some(v[idx as usize]),
+                    _ => None,
+                }
             }
-        }
-        Some(v) => av_int(v),
+            None => av_int(v),
+        },
         None => None,
     };
     Shape::Tuple(out)
@@ -2418,8 +2443,8 @@ pub fn spec_shape_with(env: &BoundEnv, spec: &ShapeSpec, memo: &mut Memo) -> Sha
                 return Shape::Unknown;
             };
             // The target is a shape attr value (tuple of ints/-1).
-            let target = match &v {
-                AttrValue::Array(items) => items
+            let target = seq_items(&v).and_then(|items| {
+                items
                     .iter()
                     .map(|d| match d {
                         AttrValue::Int(n) => Some(Some(*n)),
@@ -2427,9 +2452,8 @@ pub fn spec_shape_with(env: &BoundEnv, spec: &ShapeSpec, memo: &mut Memo) -> Sha
                         AttrValue::Bool(b) => Some(Some(i64::from(*b))),
                         _ => Some(None),
                     })
-                    .collect::<Option<Vec<Dim>>>(),
-                _ => None,
-            };
+                    .collect::<Option<Vec<Dim>>>()
+            });
             let Some(target) = target else {
                 return Shape::Unknown;
             };
@@ -2559,15 +2583,15 @@ pub fn spec_shape_with(env: &BoundEnv, spec: &ShapeSpec, memo: &mut Memo) -> Sha
                 // `_attr_dims`: bare non-bool int, or a non-empty
                 // tuple of non-bool ints.
                 AttrValue::Int(n) => Some(vec![*n]),
-                AttrValue::Array(a) if !a.is_empty() => a
-                    .iter()
-                    .map(|i| match i {
-                        AttrValue::Int(n) => Some(*n),
-                        AttrValue::UInt(n) => i64::try_from(*n).ok(),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>(),
-                _ => None,
+                _ => seq_items(v).filter(|a| !a.is_empty()).and_then(|a| {
+                    a.iter()
+                        .map(|i| match i {
+                            AttrValue::Int(n) => Some(*n),
+                            AttrValue::UInt(n) => i64::try_from(*n).ok(),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()
+                }),
             });
             let s = spec_shape_with(env, t, memo);
             let Some(su) = tshape(s) else {
@@ -2600,7 +2624,7 @@ pub fn spec_shape_with(env: &BoundEnv, spec: &ShapeSpec, memo: &mut Memo) -> Sha
             let (Some(d), Some(v)) = (aval_int(env, d), idx.resolve(env)) else {
                 return Shape::Unknown;
             };
-            let AttrValue::Array(items) = v else {
+            let Some(items) = seq_items(&v) else {
                 return Shape::Unknown;
             };
             let mut out = base.clone();
@@ -2637,7 +2661,8 @@ pub mod pred {
     //! (`tval`/`tapp` dspec exprs) — named refusals there.
 
     use super::{
-        AttrArg, Memo, Shape, ShapeSpec, av_int, broadcast, matmul_shape, spec_shape_with,
+        AttrArg, Memo, Shape, ShapeSpec, av_int, broadcast, matmul_shape, seq_items,
+        spec_shape_with,
     };
     use handl_egraph::AttrValue;
     use handl_egraph::BoundEnv;
@@ -3023,7 +3048,7 @@ pub mod pred {
         if s.is_empty() {
             return false;
         }
-        let AttrValue::Array(items) = val else {
+        let Some(items) = seq_items(&val) else {
             return false;
         };
         // `isinstance(i, int) and not isinstance(i, bool)` — bools are
@@ -3058,10 +3083,8 @@ pub mod pred {
     /// on mixed types would; float-vs-int numeric equality is the one
     /// place this reads *stricter* than Python — a safe direction).
     fn aval_elems(env: &BoundEnv, a: &AttrArg) -> Option<Vec<Option<i64>>> {
-        match a.resolve(env)? {
-            AttrValue::Array(items) => Some(items.iter().map(av_int).collect()),
-            _ => None,
-        }
+        let v = a.resolve(env)?;
+        seq_items(&v).map(|items| items.iter().map(av_int).collect())
     }
 
     /// `_concrete_specs`: every spec must resolve to an all-int tuple.

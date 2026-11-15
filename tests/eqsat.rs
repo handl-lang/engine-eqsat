@@ -1341,6 +1341,59 @@ fn softmax_fold_fires_and_vetoes() {
 }
 
 #[test]
+fn softmax_fold_reads_the_wire_tuple_envelope() {
+    // WP4 F2: a real lift carries `dim=(-1,)` as the
+    // `{"__tuple__": [-1]}` attr envelope (`attr_to_data`), not a
+    // bare array — the guard layer must decode it or
+    // `attr-type "tuple"`/`attr-len`/`attr0` all decline and the
+    // law can never fire.
+    let law = builtin::softmax_fold();
+    let u = tensor(&[2, 4]);
+    let manual = |dim: serde_json::Value| {
+        native_op(
+            "div",
+            vec![
+                native_op("exp", vec![u.clone()]),
+                op_attrs(
+                    "sum",
+                    vec![native_op("exp", vec![u.clone()])],
+                    json!({"dim": dim, "keepdim": true}),
+                ),
+            ],
+        )
+    };
+    let expected = op_attrs("softmax", vec![u.clone()], json!({"dim": -1}));
+
+    // The wire spelling fires and derives the same scalar dim.
+    let input = manual(json!({"__tuple__": [-1]}));
+    assert_fires(&input, &law, &expected);
+
+    // `{"__list__": [-1]}` is a *list* attr — Python's
+    // `isinstance(dim, tuple)` is False, so the tuple arm declines
+    // and the int arm never applied either: no fire, exactly the
+    // cond.py verdict.
+    let input = manual(json!({"__list__": [-1]}));
+    assert_no_fire(&input, &law);
+}
+
+#[test]
+fn reshape_attr_envelope_reads_through_shape_guards() {
+    // The shape-spec attr reads (`reshape-out`'s target, `attr_dims`)
+    // see through the same envelopes — a `{"__tuple__": [1,4]}`
+    // reshape target is the `[1,4]` shape to the guard.
+    let law = builtin::mul_reshape_inert_l();
+    let (u, v) = (tensor(&[4]), tensor(&[1, 4]));
+    let reshaped = op_attrs(
+        "reshape",
+        vec![u.clone()],
+        json!({"shape": {"__tuple__": [1, 4]}}),
+    );
+    let input = native_op("mul", vec![reshaped, v.clone()]);
+    let expected = native_op("mul", vec![u, v]);
+    assert_fires(&input, &law, &expected);
+}
+
+#[test]
 fn glu_fold_fires_and_vetoes() {
     let law = builtin::glu_fold();
     let chunk = |u: &KTerm, index: i64| {

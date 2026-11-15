@@ -26,7 +26,11 @@
 //!   mangling is the `Subst::attrs` split). Attr positions accept the
 //!   same three spellings as `_aval`: a string names a bound attr
 //!   metavariable, an array is an inline derive [`Expr`], anything
-//!   else is a literal.
+//!   else is a literal. Bound attr values decode the mlopt wire
+//!   envelopes — `{"__tuple__": […]}`/`{"__list__": […]}`
+//!   (`mlopt_core.ir.attr_to_data`) — to [`V::Seq`]/[`V::List`]
+//!   exactly like `attr_from_data`, and `to_attr` re-encodes them
+//!   the same way, so derived attrs stay wire-canonical.
 //! * Exprs: literals, `lit`, `attr`, `attr0`, `const`, `len`, `tuple`,
 //!   `concat`, `gather`, `unique`, `posmap`, `nth`, `take`, `sum`,
 //!   `guard`, `if`, the arithmetic/comparison ops `add` `sub` `mul`
@@ -136,16 +140,18 @@ impl std::fmt::Display for GuardError {
 impl std::error::Error for GuardError {}
 
 // ---------------------------------------------------------------------------
-//  The value domain — cond.py's int/float/bool/None/str/tuple lifted
+//  The value domain — cond.py's int/float/bool/None/str/tuple/list lifted
 // ---------------------------------------------------------------------------
 
 /// A guard-dsl value: the Python `int | float | bool | None | str |
-/// tuple` domain the `cond`/`dspec` exprs compute over.
+/// tuple | list` domain the `cond`/`dspec` exprs compute over.
 ///
-/// `Seq` is the tuple/list normal form (the port's
-/// tuple-normalised attrs); `Obj` carries map payloads (the
-/// `__attrs__` object a whole-payload `attrs_bind` produces) so
-/// `attr-eq`-style comparisons stay honest.
+/// `Seq`/`List` are *distinct* — cond.py's `isinstance(v, tuple)`
+/// gates (`attr-type "tuple"`, `attr-len`, `attr0`) admit tuples
+/// only, and `tuple != list` under `==`. `Obj` carries map payloads
+/// (the `__attrs__` object a whole-payload `attrs_bind` produces, or
+/// a literal dict a record spells) so `attr-eq`-style comparisons
+/// stay honest.
 #[derive(Clone, Debug, PartialEq)]
 pub enum V {
     /// Python `None` / JSON `null`.
@@ -159,8 +165,12 @@ pub enum V {
     Float(f64),
     /// Python `str`.
     Str(Rc<str>),
-    /// Python `tuple`/`list` — sequence values.
+    /// Python `tuple` — sequence values (`AttrValue::Array` reads
+    /// here too: the port's tuple-normalised attrs).
     Seq(Rc<[V]>),
+    /// Python `list` — only reachable through the
+    /// `{"__list__": […]}` wire envelope (see [`V::from_attr`]).
+    List(Rc<[V]>),
     /// A string-keyed map (JSON object / `AttrValue::Object`).
     Obj(Rc<BTreeMap<Rc<str>, V>>),
 }
@@ -200,7 +210,12 @@ impl V {
     }
 
     /// Lower into the e-graph's [`AttrValue`] — the `Derived::Attr`
-    /// payload channel.
+    /// payload channel. Sequences re-encode as the mlopt wire
+    /// envelopes — `attr_to_data`'s `{"__tuple__": […]}` /
+    /// `{"__list__": […]}` (`ir.py`) — so a derived attr is
+    /// indistinguishable from a bridged one: congruence compares
+    /// equal and the extracted term decodes back to a Python
+    /// `tuple`/`list` (a bare `Array` would surface as a `list`).
     pub fn to_attr(&self) -> AttrValue {
         match self {
             V::Null => AttrValue::Null,
@@ -208,16 +223,22 @@ impl V {
             V::Int(n) => AttrValue::Int(*n),
             V::Float(f) => AttrValue::Float(*f),
             V::Str(s) => AttrValue::Str(s.clone()),
-            V::Seq(items) => {
-                AttrValue::Array(items.iter().map(V::to_attr).collect::<Vec<_>>().into())
-            }
+            V::Seq(items) => seq_wire_attr("__tuple__", items),
+            V::List(items) => seq_wire_attr("__list__", items),
             V::Obj(map) => AttrValue::Object(Rc::new(
                 map.iter().map(|(k, v)| (k.clone(), v.to_attr())).collect(),
             )),
         }
     }
 
-    /// Lift a bound [`AttrValue`] into the value domain.
+    /// Lift a bound [`AttrValue`] into the value domain — the
+    /// `attr_from_data` inverse: the mlopt wire envelopes
+    /// `{"__tuple__": […]}` / `{"__list__": […]}` decode to
+    /// [`V::Seq`]/[`V::List`] recursively (a nested tuple attr is a
+    /// tuple of tuples, exactly like Python). A malformed envelope —
+    /// the marker key with a non-array payload — stays an [`V::Obj`]
+    /// (decline, never a fabricated sequence); `AttrValue::Array`
+    /// itself reads as [`V::Seq`], the port's tuple normal form.
     pub fn from_attr(a: &AttrValue) -> V {
         match a {
             AttrValue::Null => V::Null,
@@ -232,13 +253,54 @@ impl V {
             AttrValue::Array(items) => {
                 V::Seq(items.iter().map(V::from_attr).collect::<Vec<_>>().into())
             }
-            AttrValue::Object(map) => V::Obj(Rc::new(
-                map.iter()
-                    .map(|(k, v)| (k.clone(), V::from_attr(v)))
-                    .collect(),
-            )),
+            AttrValue::Object(map) => {
+                if let Some((items, is_list)) = envelope_items(map) {
+                    let vals: Vec<V> = items.iter().map(V::from_attr).collect();
+                    return if is_list {
+                        V::List(vals.into())
+                    } else {
+                        V::Seq(vals.into())
+                    };
+                }
+                V::Obj(Rc::new(
+                    map.iter()
+                        .map(|(k, v)| (k.clone(), V::from_attr(v)))
+                        .collect(),
+                ))
+            }
         }
     }
+}
+
+/// The mlopt attr wire envelopes — `mlopt_core.ir.attr_to_data`'s
+/// `{"__tuple__": […]}` / `{"__list__": […]}` encoding of Python
+/// `tuple`/`list` attr values. Returns the payload items and whether
+/// the envelope spelled a *list*; `None` for anything else (a
+/// genuine object, a marker key with a non-array payload, or a
+/// multi-key map — none of which `attr_to_data` can emit).
+fn envelope_items(map: &BTreeMap<Rc<str>, AttrValue>) -> Option<(&[AttrValue], bool)> {
+    if map.len() != 1 {
+        return None;
+    }
+    if let Some(AttrValue::Array(items)) = map.get("__tuple__") {
+        return Some((items, false));
+    }
+    if let Some(AttrValue::Array(items)) = map.get("__list__") {
+        return Some((items, true));
+    }
+    None
+}
+
+/// The `to_attr` spelling of a sequence value — the single-key
+/// envelope object `attr_to_data` emits for the matching Python
+/// type.
+fn seq_wire_attr(key: &str, items: &[V]) -> AttrValue {
+    let mut map = BTreeMap::new();
+    map.insert(
+        Rc::from(key),
+        AttrValue::Array(items.iter().map(V::to_attr).collect::<Vec<_>>().into()),
+    );
+    AttrValue::Object(Rc::new(map))
 }
 
 /// Python `==` over the value domain — the numeric tower
@@ -256,6 +318,8 @@ pub(crate) fn v_eq(a: &V, b: &V) -> bool {
         (Float(x), Float(y)) => x == y,
         (Str(x), Str(y)) => x == y,
         (Seq(x), Seq(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| v_eq(p, q)),
+        (List(x), List(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| v_eq(p, q)),
+        // `tuple == list` is False in Python even elementwise.
         (Obj(x), Obj(y)) => {
             x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| v_eq(v, w)))
         }
@@ -313,10 +377,11 @@ fn v_cmp(a: &V, b: &V) -> Option<std::cmp::Ordering> {
             }
         }
         (Str(x), Str(y)) => Some(x.cmp(y)),
-        // Tuple ordering: first non-equal pair decides; a prefix
-        // compares by length. An unorderable element pair propagates
-        // the TypeError → decline.
-        (Seq(x), Seq(y)) => {
+        // Tuple/list ordering: first non-equal pair decides; a
+        // prefix compares by length. An unorderable element pair —
+        // or a tuple/list mix (Python raises `TypeError` there) —
+        // propagates the decline.
+        (Seq(x), Seq(y)) | (List(x), List(y)) => {
             for (p, q) in x.iter().zip(y.iter()) {
                 if !v_eq(p, q) {
                     return v_cmp(p, q);
@@ -800,7 +865,7 @@ fn aval_is(v: Option<&V>, lit: &V) -> bool {
 /// Python would raise — declined (`false`) here.
 fn v_contains(hay: &V, needle: &V) -> bool {
     match hay {
-        V::Seq(items) => items.iter().any(|x| v_eq(x, needle)),
+        V::Seq(items) | V::List(items) => items.iter().any(|x| v_eq(x, needle)),
         V::Str(s) => match needle {
             V::Str(n) => s.contains(n.as_ref()),
             _ => false,
@@ -917,7 +982,10 @@ impl Pred {
                 _ => false,
             },
             Pred::AttrInts(a) => match a.eval(env) {
-                Some(V::Seq(items)) => items.iter().all(|x| matches!(x, V::Int(_) | V::Bool(_))),
+                // `isinstance(v, (tuple, list))` — both sequences.
+                Some(V::Seq(items)) | Some(V::List(items)) => {
+                    items.iter().all(|x| matches!(x, V::Int(_) | V::Bool(_)))
+                }
                 _ => false,
             },
             Pred::Shape(sp) => sp.eval(env),
@@ -939,7 +1007,8 @@ pub enum Expr {
     LitWrap(V),
     /// `("attr", x)` — `_aval(x)`; missing declines.
     Attr(Aval),
-    /// `("attr0", x)` — `v[0]` for a seq, else `v`.
+    /// `("attr0", x)` — `v[0]` for a *tuple*, else `v` (a list
+    /// attr reads whole — cond.py's `isinstance(v, tuple)` gate).
     Attr0(Aval),
     /// `("const", T)` — the bound leaf's `.value`.
     Const(TermRef),
@@ -1059,10 +1128,12 @@ fn int_v(n: i128) -> Option<V> {
 
 /// Hashability for `unique`/`posmap` element compares — Python
 /// `dict.fromkeys`/`list.index` need hashable elements; a map is
-/// not, and a sequence is iff its elements are.
+/// not, a list never is, and a tuple is iff its elements are.
 fn hashable(v: &V) -> bool {
     match v {
-        V::Obj(_) => false,
+        // dict.fromkeys/list.index need hashable elements: a map is
+        // not, a list never is, and a tuple is iff its elements are.
+        V::Obj(_) | V::List(_) => false,
         V::Seq(items) => items.iter().all(hashable),
         _ => true,
     }
@@ -1252,6 +1323,8 @@ impl Expr {
             Expr::Lit(v) | Expr::LitWrap(v) => Some(v.clone()),
             Expr::Attr(a) => a.eval(env),
             Expr::Attr0(a) => match a.eval(env)? {
+                // `_d_attr0`: `v[0]` iff `isinstance(v, tuple)` —
+                // a list attr returns whole, like every non-tuple.
                 V::Seq(items) => {
                     if items.is_empty() {
                         None
@@ -1263,7 +1336,7 @@ impl Expr {
             },
             Expr::Const(t) => num_value(env, t),
             Expr::Len(e) => match e.eval(env)? {
-                V::Seq(items) => Some(V::Int(items.len() as i64)),
+                V::Seq(items) | V::List(items) => Some(V::Int(items.len() as i64)),
                 V::Str(s) => Some(V::Int(s.chars().count() as i64)),
                 _ => None,
             },
@@ -1277,7 +1350,11 @@ impl Expr {
                 let mut out = Vec::new();
                 for e in es {
                     match e.eval(env)? {
-                        V::Seq(items) => out.extend(items.iter().cloned()),
+                        // `_d_concat`: tuple/list operands; the
+                        // result is always a tuple.
+                        V::Seq(items) | V::List(items) => {
+                            out.extend(items.iter().cloned());
+                        }
                         _ => return None,
                     }
                 }
@@ -1286,7 +1363,8 @@ impl Expr {
             Expr::Gather(table, sel) => {
                 let table = table.eval(env)?;
                 let sel = sel.eval(env)?;
-                let (V::Seq(table), V::Seq(sel)) = (&table, &sel) else {
+                let (V::Seq(table) | V::List(table), V::Seq(sel) | V::List(sel)) = (&table, &sel)
+                else {
                     return None;
                 };
                 // Selectors: non-bool ints in [0, len(table)).
@@ -1308,7 +1386,7 @@ impl Expr {
                 ))
             }
             Expr::Unique(e) => {
-                let V::Seq(items) = e.eval(env)? else {
+                let (V::Seq(items) | V::List(items)) = e.eval(env)? else {
                     return None;
                 };
                 if !items.iter().all(hashable) {
@@ -1327,7 +1405,9 @@ impl Expr {
                 Some(V::Seq(out.into()))
             }
             Expr::Posmap(dom, keys) => {
-                let (V::Seq(dom), V::Seq(keys)) = (dom.eval(env)?, keys.eval(env)?) else {
+                let (V::Seq(dom) | V::List(dom), V::Seq(keys) | V::List(keys)) =
+                    (dom.eval(env)?, keys.eval(env)?)
+                else {
                     return None;
                 };
                 let mut out = Vec::with_capacity(keys.len());
@@ -1338,7 +1418,7 @@ impl Expr {
                 Some(V::Seq(out.into()))
             }
             Expr::Nth(seq, i) => {
-                let (V::Seq(seq), i) = (seq.eval(env)?, i.eval(env)?) else {
+                let (V::Seq(seq) | V::List(seq), i) = (seq.eval(env)?, i.eval(env)?) else {
                     return None;
                 };
                 // isinstance(i, int) — bool admitted; negative reach.
@@ -1355,7 +1435,7 @@ impl Expr {
                 Some(seq[idx].clone())
             }
             Expr::Take(seq, k) => {
-                let (V::Seq(seq), k) = (seq.eval(env)?, k.eval(env)?) else {
+                let (V::Seq(seq) | V::List(seq), k) = (seq.eval(env)?, k.eval(env)?) else {
                     return None;
                 };
                 let n = match k {
@@ -1369,7 +1449,7 @@ impl Expr {
                 Some(V::Seq(seq[..end].to_vec().into()))
             }
             Expr::Sum(e) => {
-                let V::Seq(items) = e.eval(env)? else {
+                let (V::Seq(items) | V::List(items)) = e.eval(env)? else {
                     return None;
                 };
                 // sum() starts at int 0; a float operand promotes
@@ -1656,10 +1736,17 @@ fn binop(op: BinOp, a: V, b: V) -> Option<V> {
     // operators over non-scalars.
     match op {
         BinOp::Add => match (&a, &b) {
+            // `tuple + tuple` → tuple, `list + list` → list; a mix
+            // is a Python `TypeError` → decline.
             (V::Seq(x), V::Seq(y)) => {
                 let mut out = x.to_vec();
                 out.extend(y.iter().cloned());
                 Some(V::Seq(out.into()))
+            }
+            (V::List(x), V::List(y)) => {
+                let mut out = x.to_vec();
+                out.extend(y.iter().cloned());
+                Some(V::List(out.into()))
             }
             (V::Str(x), V::Str(y)) => Some(V::Str(Rc::from(format!("{x}{y}")))),
             _ => None,
@@ -1676,7 +1763,11 @@ fn binop(op: BinOp, a: V, b: V) -> Option<V> {
 fn seq_repeat(a: &V, b: &V) -> Option<V> {
     fn rep(unit: &V, n: i64) -> V {
         if n <= 0 {
-            return V::Seq(Rc::from(Vec::new()));
+            // `() * k` / `[] * k` keep the operand's own type.
+            return match unit {
+                V::List(_) => V::List(Rc::from(Vec::new())),
+                _ => V::Seq(Rc::from(Vec::new())),
+            };
         }
         match unit {
             V::Seq(items) => {
@@ -1685,6 +1776,13 @@ fn seq_repeat(a: &V, b: &V) -> Option<V> {
                     out.extend(items.iter().cloned());
                 }
                 V::Seq(out.into())
+            }
+            V::List(items) => {
+                let mut out = Vec::with_capacity(items.len() * n as usize);
+                for _ in 0..n {
+                    out.extend(items.iter().cloned());
+                }
+                V::List(out.into())
             }
             V::Str(s) => V::Str(Rc::from(s.repeat(n as usize))),
             _ => unreachable!("rep called on non-repeatable"),
@@ -1698,8 +1796,8 @@ fn seq_repeat(a: &V, b: &V) -> Option<V> {
         }
     };
     match (a, b) {
-        (V::Seq(_) | V::Str(_), _) if count(b).is_some() => Some(rep(a, count(b)?)),
-        (_, V::Seq(_) | V::Str(_)) if count(a).is_some() => Some(rep(b, count(a)?)),
+        (V::Seq(_) | V::List(_) | V::Str(_), _) if count(b).is_some() => Some(rep(a, count(b)?)),
+        (_, V::Seq(_) | V::List(_) | V::Str(_)) if count(a).is_some() => Some(rep(b, count(a)?)),
         _ => None,
     }
 }
@@ -2728,5 +2826,147 @@ mod tests {
             eval_expr(json!(["bcast", "c", "missing"]), &e3),
             Some(V::Seq(Rc::from(vec![])))
         );
+    }
+
+    // -----------------------------------------------------------------
+    //  The `__tuple__`/`__list__` wire envelopes (WP4 F2)
+    // -----------------------------------------------------------------
+
+    /// An mlopt attr value spelled the way `attr_to_data` emits it —
+    /// `AttrValue::from` of the envelope JSON.
+    fn wire(v: Value) -> AttrValue {
+        AttrValue::from(&v)
+    }
+
+    #[test]
+    fn tuple_envelope_reads_as_tuple_everywhere() {
+        // `{"__tuple__": [-1]}` — the `dim=(-1,)` spelling a real
+        // lift carries — must satisfy every tuple-attr guard the
+        // opaque `V::Obj` reading used to decline (softmax_fold's
+        // exact guard shape).
+        let e = env(
+            &[],
+            &[
+                ("RD", wire(json!({"__tuple__": [-1]}))),
+                ("RK", wire(json!(true))),
+            ],
+        );
+        assert!(eval_cond(
+            json!([
+                "and",
+                ["attr-is", "RK", true],
+                [
+                    "or",
+                    ["attr-type", "RD", "int"],
+                    [
+                        "and",
+                        ["attr-type", "RD", "tuple"],
+                        ["attr-len", "RD", "==", 1]
+                    ]
+                ]
+            ]),
+            &e
+        ));
+        // The `attr0` dspec unwraps to the scalar -1.
+        assert_eq!(eval_expr(json!(["attr0", "RD"]), &e), Some(V::Int(-1)));
+        // `attr-ints` and the sequence exprs read the elements.
+        assert!(eval_cond(json!(["attr-ints", "RD"]), &e));
+        assert_eq!(
+            eval_expr(json!(["len", ["attr", "RD"]]), &e),
+            Some(V::Int(1))
+        );
+        assert_eq!(
+            eval_expr(json!(["nth", ["attr", "RD"], 0]), &e),
+            Some(V::Int(-1))
+        );
+        assert_eq!(
+            eval_expr(json!(["sum", ["attr", "RD"]]), &e),
+            Some(V::Int(-1))
+        );
+        // `attr-eq` against the tuple literal spelling.
+        assert!(eval_cond(json!(["attr-eq", "RD", [-1]]), &e));
+    }
+
+    #[test]
+    fn list_envelope_reads_as_list_not_tuple() {
+        // `{"__list__": [-1]}` — Python `isinstance(v, tuple)` is
+        // False for a list: `attr-type "tuple"`, `attr-len` and the
+        // `attr0` index all decline/whole-read exactly like cond.py.
+        let e = env(&[], &[("D", wire(json!({"__list__": [-1, 2]})))]);
+        assert!(!eval_cond(json!(["attr-type", "D", "tuple"]), &e));
+        assert!(!eval_cond(json!(["attr-len", "D", "==", 2]), &e));
+        // `_d_attr0` returns a non-tuple whole — the list itself.
+        assert_eq!(
+            eval_expr(json!(["attr0", "D"]), &e),
+            Some(V::List(Rc::from(vec![V::Int(-1), V::Int(2)])))
+        );
+        // …but the `(tuple, list)` union reads still admit it.
+        assert!(eval_cond(json!(["attr-ints", "D"]), &e));
+        assert_eq!(
+            eval_expr(json!(["len", ["attr", "D"]]), &e),
+            Some(V::Int(2))
+        );
+        assert_eq!(
+            eval_expr(json!(["nth", ["attr", "D"], -1]), &e),
+            Some(V::Int(2))
+        );
+        // `tuple != list` under `==` — an attr-eq against the same
+        // elements spelled as a tuple literal declines.
+        assert!(!eval_cond(json!(["attr-eq", "D", [-1, 2]]), &e));
+        // A record literal spelled as the envelope *object* stays a
+        // dict (`V::from_json` does not decode — cond.py's `_d_lit`
+        // returns it verbatim), so it never equals the list attr.
+        assert!(!eval_cond(
+            json!(["attr-eq", "D", {"__list__": [-1, 2]}]),
+            &e
+        ));
+    }
+
+    #[test]
+    fn envelope_round_trips_through_to_attr() {
+        // A derived sequence attr re-encodes as the wire envelope —
+        // congruent with a bridged attr and decodable back to the
+        // same Python type (`attr_from_data` symmetry).
+        let seq = V::Seq(Rc::from(vec![V::Int(2), V::Int(3)]));
+        let lseq = V::List(Rc::from(vec![V::Int(1)]));
+        assert_eq!(
+            seq.to_attr(),
+            AttrValue::from(&json!({"__tuple__": [2, 3]}))
+        );
+        assert_eq!(lseq.to_attr(), AttrValue::from(&json!({"__list__": [1]})));
+        // …and `from_attr` reads both spellings back.
+        assert_eq!(V::from_attr(&seq.to_attr()), seq);
+        assert_eq!(V::from_attr(&lseq.to_attr()), lseq);
+        // A bare `AttrValue::Array` stays the tuple normal form.
+        assert_eq!(
+            V::from_attr(&AttrValue::from(&json!([1, 2]))),
+            V::Seq(Rc::from(vec![V::Int(1), V::Int(2)]))
+        );
+        // Nested envelopes decode recursively — a tuple of tuples.
+        let nested = wire(json!({"__tuple__": [{"__tuple__": [1]}, 2]}));
+        assert_eq!(
+            V::from_attr(&nested),
+            V::Seq(Rc::from(vec![V::Seq(Rc::from(vec![V::Int(1)])), V::Int(2)]))
+        );
+    }
+
+    #[test]
+    fn malformed_envelope_stays_an_object() {
+        // `{"__tuple__": 5}` — the marker key with a non-array
+        // payload is not a sequence `attr_to_data` could emit;
+        // reading it as `V::Obj` keeps every seq gate declining.
+        let e = env(&[], &[("D", wire(json!({"__tuple__": 5})))]);
+        assert!(!eval_cond(json!(["attr-type", "D", "tuple"]), &e));
+        assert!(!eval_cond(json!(["attr-ints", "D"]), &e));
+        assert_eq!(
+            eval_expr(json!(["attr0", "D"]), &e),
+            Some(V::Obj(Rc::new(BTreeMap::from([(
+                Rc::from("__tuple__"),
+                V::Int(5)
+            )]))))
+        );
+        // A multi-key object is a genuine map, never an envelope.
+        let e2 = env(&[], &[("M", wire(json!({"__tuple__": [1], "x": 2})))]);
+        assert!(!eval_cond(json!(["attr-type", "M", "tuple"]), &e2));
     }
 }
