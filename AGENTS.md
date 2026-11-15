@@ -58,11 +58,20 @@ live in `handl-lang/host:project/reports/engine-eqsat-spike.md`.
   `StopPolicy`, `Saturated`/`OptimizeResult`, `Error`. Kernel
   `Term`s in and out; the saturated `EGraph` (with `ProofEdge`/
   `Application` provenance) stays inspectable on the result.
+- `laws/` — only `reshape_flatten_demo.json` (the UNSOUND attrs-bind
+  matcher demo, quarantined engine-side). The `LAW_FORMAT = 2`
+  corpus is canonical in `handl-kit-eqsat` (`data/laws/*.json`,
+  ADR-0177 §1): tests decode it via the `handl-kit-eqsat`
+  dev-dependency (`law_pack(name).json`), and
+  `examples/emit_laws.rs` is the regeneration path from the `builtin`
+  constructors — its output is synced into kit-eqsat, never vendored
+  back. `prim_folds` is kit-side minted-record data with no emit arm.
 
 ## Substrate deps
 
 `handl-egraph` (`handl-lang/egraph` — the finished e-graph port),
-`hnl-engine` (`handl-lang/engine` — the `Term` kernel), `serde_json`.
+`hnl-engine` (`handl-lang/engine` — the `Term` kernel), `serde_json`;
+dev-dep `handl-kit-eqsat` (`handl-lang/kit-eqsat` — the law corpus).
 All git `branch = "main"` deps; the `[patch]` dev-link tables in
 `Cargo.toml` resolve them to sibling checkouts locally (regenerate
 with `scripts/dev-link.sh` if the dep set changes — the markers are
