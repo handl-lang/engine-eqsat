@@ -63,10 +63,11 @@ impl LawSet {
     /// # Errors
     ///
     /// The first [`LawError`] any law reports — including
-    /// [`LawError::GuardDeferred`] (a `cond`/`dspec` tree with no
-    /// stage-1 interpreter) and [`LawError::Unserializable`] (the
-    /// record's honesty flags). One bad law refuses the set: a
-    /// partially-applied rule set is a silent weakening.
+    /// [`LawError::GuardUnsupported`]/[`LawError::GuardMalformed`]
+    /// (a `cond`/`dspec` tree outside the stage-1 vocabulary) and
+    /// [`LawError::Unserializable`] (the record's honesty flags).
+    /// One bad law refuses the set: a partially-applied rule set is
+    /// a silent weakening.
     pub fn compile(&self) -> Result<Vec<Rewrite>, LawError> {
         self.laws.iter().map(Law::compile).collect()
     }

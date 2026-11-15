@@ -171,26 +171,38 @@ fn law_record_carries_every_metadata_field() {
 }
 
 #[test]
-fn deferred_cond_and_dspec_load_but_refuse_to_fire() {
+fn guarded_records_round_trip_and_interpret() {
     // A record carrying guard trees loads with the data preserved —
-    // never silently dropped — and compile names the refusal.
+    // never silently dropped — and stage-1 guards compile into the
+    // check/derive hooks.
     let mut law = builtin::id_add();
     law.cond = Some(json!(["and", ["attr-eq", "dim", 1]]));
-    law.dspec = Some(json!(["attr", "out"]));
+    law.dspec = Some(json!({"$attr:out": ["attr", "dim"]}));
     let back = Law::from_data(&law.to_data()).unwrap();
     assert_eq!(back.cond, law.cond);
     assert_eq!(back.dspec, law.dspec);
+    assert!(back.compile().is_ok());
+
+    // An unported flat-map/repeat guard refuses by name — never approximated.
+    let mut law3 = builtin::id_add();
+    law3.cond = Some(json!(["flat-pair-unsq", "x"]));
     assert!(matches!(
-        back.compile(),
-        Err(LawError::GuardDeferred { field: "cond", .. })
+        law3.compile(),
+        Err(LawError::GuardUnsupported { .. })
     ));
 
-    // dspec alone is also deferred.
-    let mut law2 = builtin::id_add();
-    law2.dspec = Some(json!(["attr", "x"]));
+    // A malformed node refuses as malformed, not unsupported.
+    let mut law4 = builtin::id_add();
+    law4.cond = Some(json!(["leaf"])); // missing the term arg
     assert!(matches!(
-        law2.compile(),
-        Err(LawError::GuardDeferred { field: "dspec", .. })
+        law4.compile(),
+        Err(LawError::GuardMalformed { .. })
+    ));
+    let mut law5 = builtin::id_add();
+    law5.dspec = Some(json!({"X": ["shape", "u"]})); // stage-3 expr
+    assert!(matches!(
+        law5.compile(),
+        Err(LawError::GuardUnsupported { .. })
     ));
 }
 
@@ -223,7 +235,7 @@ fn engine_names_the_record_refusals() {
     // wrapped LawError.
     let guarded = {
         let mut l = builtin::id_add();
-        l.cond = Some(json!(["leaf"]));
+        l.cond = Some(json!(["flat-pair-unsq", "x"]));
         l
     };
     let input = native_op("add", vec![kconst(json!(1)), kconst(json!(0))]);
@@ -348,9 +360,12 @@ fn lawset_compile_collects_rules_and_refuses_sets() {
     assert_eq!(rules[0].name.as_ref(), "id_add");
 
     let mut guarded = builtin::id_mul();
-    guarded.cond = Some(json!(["leaf"]));
+    guarded.cond = Some(json!(["flat-pair-unsq", "x"]));
     let bad = LawSet::from_laws(vec![guarded]);
-    assert!(matches!(bad.compile(), Err(LawError::GuardDeferred { .. })));
+    assert!(matches!(
+        bad.compile(),
+        Err(LawError::GuardUnsupported { .. })
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -569,13 +584,22 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     let expected = builtin::simplification();
     assert_eq!(simpl.laws(), expected.as_slice());
 
+    // laws/prior_art.json — the stage-1-portable PRIOR_ART_RULES
+    // slice: const-guarded folds whose `cond`/`dspec` trees are the
+    // `cond.py` spelling carried as record data.
+    let pa = LawSet::from_json(include_str!("../laws/prior_art.json")).unwrap();
+    assert_eq!(pa.laws(), builtin::prior_art().as_slice());
+    // Every guarded record compiles — the corpus exercises the whole
+    // stage-1 vocabulary end to end.
+    assert_eq!(pa.compile().unwrap().len(), pa.laws().len());
+
     // laws/reshape_flatten_demo.json — the UNSOUND attrs-bind demo
     // (matcher coverage only; the `_demo` name is the warning).
     let flat = LawSet::from_json(include_str!("../laws/reshape_flatten_demo.json")).unwrap();
     assert_eq!(flat.laws(), &[builtin::reshape_flatten_demo()]);
 
     // And the records re-serialize byte-stably through the codec.
-    for set in [simpl, flat] {
+    for set in [simpl, pa, flat] {
         let reloaded = LawSet::from_data(&set.to_data()).unwrap();
         assert_eq!(reloaded, set);
     }

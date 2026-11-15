@@ -31,8 +31,9 @@ pub enum Error {
     /// (`serializable: false` / `missing_hooks`) — firing it would
     /// silently drop procedural hooks. Named refusal (design doc §1).
     UnserializableLaw(String),
-    /// A law carries a `cond`/`dspec` guard as deferred data with no
-    /// stage-1 interpreter — firing would silently drop the side
+    /// A law's `cond`/`dspec` names a guard op outside the ported
+    /// vocabulary — a flat-map/repeat pairing guard or a
+    /// tensor-backend channel. Firing would silently drop the side
     /// condition. Named refusal.
     GuardUnsupported(String),
 }
@@ -49,7 +50,7 @@ impl std::fmt::Display for Error {
             }
             Error::GuardUnsupported(name) => write!(
                 f,
-                "law '{name}' carries a deferred cond/dspec guard — no interpreter yet"
+                "law '{name}' guard names an op outside the stage-1 vocabulary"
             ),
         }
     }
@@ -174,7 +175,7 @@ fn compile_rules(laws: &[Law]) -> Result<Vec<handl_egraph::Rewrite>, Error> {
     laws.iter()
         .map(|law| match law.compile() {
             Ok(rule) => Ok(rule),
-            Err(LawError::GuardDeferred { law, .. }) => Err(Error::GuardUnsupported(law)),
+            Err(LawError::GuardUnsupported { law, .. }) => Err(Error::GuardUnsupported(law)),
             Err(LawError::Unserializable { law, .. }) => Err(Error::UnserializableLaw(law)),
             Err(e) => Err(Error::Law(e)),
         })

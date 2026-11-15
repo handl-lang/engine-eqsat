@@ -17,13 +17,15 @@
 //!   `param_bytes_cost` (leaf = param bytes), and launch-penalty
 //!   variants once a per-term constant exists.
 //!
-//! `flops`/roofline/fusion/executor models are **not** here — they
-//! need shape inference (doc §2 stage 2) or are backend algorithms.
-//! A record whose `kind` is not `count`/`size`/`op_table` is refused
-//! at load with [`CostError::UnknownKind`], never approximated. An
-//! `op_table` entry carrying a `"flops"` formula string is kept as
-//! [`OpEntry::Formula`] and prices as `+∞` until shape inference
-//! lands — deferred, never under-priced into a wrong extraction.
+//! `{"flops": "…"}` formula entries resolve against
+//! [`crate::shape`]-inferred operand/output shapes — a small
+//! arithmetic expression language over bound dim names (see
+//! [`OpEntry::Formula`] for the binding table). **A formula prices
+//! `+∞` whenever a name it references is unbound** — unknown or
+//! `Invalid` shapes, unproven dims, malformed expressions — so an
+//! op is never *under*-priced into a wrong extraction. Roofline/
+//! fusion/executor models are **not** here — they need shape
+//! inference (doc §2 stage 2) or are backend algorithms.
 //!
 //! The `FnMut(&KernelTerm) -> f64` procedural overload stays on
 //! [`crate::engine::optimize`]/[`crate::extract_best`] for genuinely
@@ -79,9 +81,11 @@ pub enum OpEntry {
     /// A view op — always costs 0 (the `_VIEW_OPS` zeroing port:
     /// reshape/transpose/slice-class ops are free).
     View,
-    /// A deferred parametric formula (e.g. `"2*m*n*k"`) — needs the
-    /// stage-2 shape inference to resolve; prices as `+∞` until then
-    /// so the op is never *under*-priced into a wrong extraction.
+    /// A parametric flops formula (e.g. `"2*m*n*k"`) evaluated
+    /// against [`crate::shape`]-inferred shapes — see
+    /// `formula_bindings` for the name table. Prices `+∞` whenever
+    /// a referenced name is unbound (unknown/`Invalid`/non-concrete
+    /// shapes) or the expression is malformed — never under-priced.
     Formula(String),
 }
 
@@ -123,21 +127,12 @@ fn is_op_encoded(op: &Op) -> bool {
 }
 
 impl OpTable {
-    /// The weight an op head contributes (its *local* cost — the
-    /// children are priced separately by [`OpTable::price`]).
-    fn head_weight(&self, op: &str) -> f64 {
-        match self.ops.get(op) {
-            None => self.default,
-            Some(OpEntry::Weight(w)) => *w,
-            Some(OpEntry::View) => 0.0,
-            Some(OpEntry::Formula(_)) => f64::INFINITY,
-        }
-    }
-
     /// Price one node; `in_dim` marks the dim-slot position (child 0
     /// of an op-encoded node) so [`OpTable::dim_leaf`] applies to
-    /// leaves there.
-    fn price_node(&self, t: &Term, in_dim: bool) -> f64 {
+    /// leaves there. `smemo` is the shared [`crate::shape::Memo`]
+    /// formula evaluation draws operand shapes from (created lazily
+    /// by [`OpTable::price`]).
+    fn price_node(&self, t: &Term, in_dim: bool, smemo: &mut Option<crate::shape::Memo>) -> f64 {
         match t {
             Term::Leaf(_) => {
                 if in_dim {
@@ -150,12 +145,33 @@ impl OpTable {
             // extraction; price it at `default` rather than guess.
             Term::Var(_) => self.default,
             Term::Op(o) => {
-                let mut total = self.head_weight(&o.op);
+                let mut total = self.head_cost(o, smemo);
                 let sourced = is_op_encoded(o);
                 for (i, child) in o.args.iter().enumerate() {
-                    total += self.price_node(child, sourced && i == 0);
+                    total += self.price_node(child, sourced && i == 0, smemo);
                 }
                 total
+            }
+        }
+    }
+
+    /// Price the whole term — one postorder pass sharing a shape
+    /// memo across every `flops` formula it meets.
+    fn price(&self, t: &Term) -> f64 {
+        let mut smemo = None;
+        self.price_node(t, false, &mut smemo)
+    }
+
+    /// The op head's local cost: flat weights, view zeroing, or a
+    /// `flops` formula over inferred shapes.
+    fn head_cost(&self, o: &Op, smemo: &mut Option<crate::shape::Memo>) -> f64 {
+        match self.ops.get(o.op.as_ref()) {
+            None => self.default,
+            Some(OpEntry::Weight(w)) => *w,
+            Some(OpEntry::View) => 0.0,
+            Some(OpEntry::Formula(f)) => {
+                let memo = smemo.get_or_insert_with(crate::shape::Memo::new);
+                formula_cost(f, o, memo)
             }
         }
     }
@@ -168,7 +184,7 @@ impl CostSpec {
         match self {
             CostSpec::Count => count(t),
             CostSpec::Size => t.size() as f64,
-            CostSpec::OpTable(table) => table.price_node(t, false),
+            CostSpec::OpTable(table) => table.price(t),
         }
     }
 
@@ -338,4 +354,338 @@ fn op_entry_from_data(op: &str, v: &Value) -> Result<OpEntry, CostError> {
         op: op.to_string(),
         detail: format!("unrecognised entry {v}"),
     })
+}
+
+// ---------------------------------------------------------------------------
+//  `flops` formulas — arithmetic over shape-inferred dim names
+// ---------------------------------------------------------------------------
+
+/// Evaluate a `{"flops": "…"}` formula for one op node.
+///
+/// The name table (`formula_bindings`) binds `out` (the output
+/// numel), `o<i>` (output dims), the per-family contraction names
+/// (`m`/`n`/`k` for matmul, `in`/`outf`/`m` for linear,
+/// `n`/`oc`/`ic`/`kh`/`kw`/`groups` for conv), all as concrete
+/// numbers — a name binds **only** when the dim is provably concrete.
+/// Any referenced-but-unbound name, a non-finite result, or a
+/// malformed expression prices `+∞`: the op is never under-priced.
+fn formula_cost(formula: &str, o: &Op, memo: &mut crate::shape::Memo) -> f64 {
+    let out_shape = crate::shape::shape_of_with(&Term::Op(o.clone()), memo);
+    let bindings = formula_bindings(o, memo, &out_shape);
+    eval_formula(formula, &bindings).unwrap_or(f64::INFINITY)
+}
+
+/// The dim-name bindings a formula may reference, per op family.
+/// Every value is a *concrete* extent — `None` dims and non-tuple
+/// shapes simply leave the name unbound.
+fn formula_bindings(
+    o: &Op,
+    memo: &mut crate::shape::Memo,
+    out_shape: &crate::shape::Shape,
+) -> BTreeMap<String, f64> {
+    use crate::shape::{Dim, Shape};
+    let mut b = BTreeMap::new();
+    let dim_f = |d: Dim| d.map(|n| n as f64);
+    if let Some(n) = crate::shape::numel_concrete(out_shape) {
+        b.insert("out".to_string(), n as f64);
+    }
+    if let Shape::Tuple(dims) = out_shape {
+        for (i, d) in dims.iter().enumerate() {
+            if let Some(v) = dim_f(*d) {
+                b.insert(format!("o{i}"), v);
+            }
+        }
+    }
+    // Real operand shapes (the dim slot is never an operand).
+    let args: Vec<&Term> = if is_op_encoded(o) {
+        o.args.iter().skip(1).collect()
+    } else {
+        o.args.iter().collect()
+    };
+    let shapes: Vec<Shape> = args
+        .iter()
+        .map(|a| crate::shape::shape_of_with(a, memo))
+        .collect();
+    let tup = |i: usize| shapes.get(i).and_then(Shape::as_tuple);
+    let name = o.op.strip_prefix("tensor.").unwrap_or(&o.op);
+    match name {
+        // matmul: m = a[-2], n = b[-1], k = contraction extent —
+        // b[-2] for rank ≥ 2, b[0] for a rank-1 rhs (the
+        // `_flops_of` matmul arm's k_dim read).
+        "matmul" => {
+            if let Some(a) = tup(0)
+                && a.len() >= 2
+                && let Some(v) = dim_f(a[a.len() - 2])
+            {
+                b.insert("m".to_string(), v);
+            }
+            if let Some(bm) = tup(1) {
+                if let Some(v) = bm.last().and_then(|d| dim_f(*d)) {
+                    b.insert("n".to_string(), v);
+                }
+                let k = if bm.len() >= 2 {
+                    dim_f(bm[bm.len() - 2])
+                } else if bm.len() == 1 {
+                    dim_f(bm[0])
+                } else {
+                    None
+                };
+                if let Some(v) = k {
+                    b.insert("k".to_string(), v);
+                }
+            }
+        }
+        // linear: m = leading-batch numel of x, outf = w[0],
+        // in = x[-1] — `2*out*in` reproduces `_flops_of`'s
+        // `2 * n_out * shapes[0][-1]`.
+        "linear" => {
+            if let Some(x) = tup(0)
+                && !x.is_empty()
+            {
+                if let Some(v) = dim_f(x[x.len() - 1]) {
+                    b.insert("in".to_string(), v);
+                }
+                let batch: i64 = x[..x.len() - 1]
+                    .iter()
+                    .try_fold(1i64, |acc, d| acc.checked_mul((*d)?))
+                    .unwrap_or(0);
+                if batch > 0 {
+                    b.insert("m".to_string(), batch as f64);
+                }
+            }
+            if let Some(w) = tup(1)
+                && !w.is_empty()
+                && let Some(v) = dim_f(w[0])
+            {
+                b.insert("outf".to_string(), v);
+            }
+        }
+        // conv1d/conv2d: n = N, oc = O, ic = C, kh/kw the kernel
+        // extents, groups the attr — `2*out*ic*kh*kw/groups`
+        // reproduces `_flops_of`'s conv arm.
+        "conv1d" | "conv2d" => {
+            let spatial = if name == "conv1d" { 1 } else { 2 };
+            if let Some(x) = tup(0) {
+                if let Some(v) = x.first().and_then(|d| dim_f(*d)) {
+                    b.insert("n".to_string(), v);
+                }
+                if x.len() > 1
+                    && let Some(v) = dim_f(x[1])
+                {
+                    b.insert("ic".to_string(), v);
+                }
+            }
+            if let Some(w) = tup(1) {
+                if let Some(v) = w.first().and_then(|d| dim_f(*d)) {
+                    b.insert("oc".to_string(), v);
+                }
+                if w.len() > spatial + 1
+                    && let Some(v) = dim_f(w[1])
+                {
+                    b.insert("ic_w".to_string(), v);
+                }
+                for (i, key) in ["kh", "kw"].iter().enumerate().take(spatial) {
+                    if let Some(v) = w.get(2 + i).and_then(|d| dim_f(*d)) {
+                        b.insert((*key).to_string(), v);
+                    }
+                }
+            }
+            if let Some(g) = o.attrs.iter().find_map(|(k, v)| {
+                if k.as_ref() == "__attrs__"
+                    && let handl_egraph::TermAttr::Lit(handl_egraph::AttrValue::Object(map)) = v
+                {
+                    return map.get("groups").and_then(|g| match g {
+                        handl_egraph::AttrValue::Int(n) => Some(*n as f64),
+                        handl_egraph::AttrValue::UInt(n) => {
+                            Some(f64::from(u32::try_from(*n).unwrap_or(u32::MAX)))
+                        }
+                        _ => None,
+                    });
+                }
+                None
+            }) && g > 0.0
+            {
+                b.insert("groups".to_string(), g);
+            }
+        }
+        _ => {}
+    }
+    b
+}
+
+/// A flops formula is a small arithmetic expression: numbers,
+/// identifiers, `+ - * /`, parentheses, unary minus. Anything else —
+/// or a name absent from `formula_bindings` — is `None` → `+∞`.
+fn eval_formula(src: &str, bindings: &BTreeMap<String, f64>) -> Option<f64> {
+    let toks = lex_formula(src)?;
+    let mut p = FormulaParser {
+        toks: &toks,
+        pos: 0,
+        bindings,
+    };
+    let v = p.expr()?;
+    if p.pos != toks.len() {
+        return None;
+    }
+    v.is_finite().then_some(v)
+}
+
+/// One formula token.
+#[derive(Clone, Debug, PartialEq)]
+enum FTok {
+    /// A numeric literal.
+    Num(f64),
+    /// A bound dim name.
+    Name(String),
+    /// `+`.
+    Add,
+    /// `-`.
+    Sub,
+    /// `*`.
+    Mul,
+    /// `/`.
+    Div,
+    /// `(`.
+    LParen,
+    /// `)`.
+    RParen,
+}
+
+/// Tokenize a formula string; `None` on any illegal byte.
+fn lex_formula(src: &str) -> Option<Vec<FTok>> {
+    let b = src.as_bytes();
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b' ' | b'\t' | b'\n' => i += 1,
+            b'+' => {
+                out.push(FTok::Add);
+                i += 1;
+            }
+            b'-' => {
+                out.push(FTok::Sub);
+                i += 1;
+            }
+            b'*' => {
+                out.push(FTok::Mul);
+                i += 1;
+            }
+            b'/' => {
+                out.push(FTok::Div);
+                i += 1;
+            }
+            b'(' => {
+                out.push(FTok::LParen);
+                i += 1;
+            }
+            b')' => {
+                out.push(FTok::RParen);
+                i += 1;
+            }
+            c if c.is_ascii_digit() || c == b'.' => {
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
+                    i += 1;
+                }
+                let text = std::str::from_utf8(&b[start..i]).ok()?;
+                out.push(FTok::Num(text.parse::<f64>().ok()?));
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                    i += 1;
+                }
+                out.push(FTok::Name(
+                    std::str::from_utf8(&b[start..i]).ok()?.to_string(),
+                ));
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Recursive-descent evaluator: `expr := term (('+'|'-') term)*`,
+/// `term := factor (('*'|'/') factor)*`,
+/// `factor := '-' factor | '(' expr ')' | num | name`.
+struct FormulaParser<'a> {
+    toks: &'a [FTok],
+    pos: usize,
+    bindings: &'a BTreeMap<String, f64>,
+}
+
+impl FormulaParser<'_> {
+    fn peek(&self) -> Option<&FTok> {
+        self.toks.get(self.pos)
+    }
+
+    fn expr(&mut self) -> Option<f64> {
+        let mut v = self.term()?;
+        while let Some(op) = self.peek() {
+            match op {
+                FTok::Add => {
+                    self.pos += 1;
+                    v += self.term()?;
+                }
+                FTok::Sub => {
+                    self.pos += 1;
+                    v -= self.term()?;
+                }
+                _ => break,
+            }
+        }
+        Some(v)
+    }
+
+    fn term(&mut self) -> Option<f64> {
+        let mut v = self.factor()?;
+        while let Some(op) = self.peek() {
+            match op {
+                FTok::Mul => {
+                    self.pos += 1;
+                    v *= self.factor()?;
+                }
+                FTok::Div => {
+                    self.pos += 1;
+                    let d = self.factor()?;
+                    if d == 0.0 {
+                        return None;
+                    }
+                    v /= d;
+                }
+                _ => break,
+            }
+        }
+        Some(v)
+    }
+
+    fn factor(&mut self) -> Option<f64> {
+        match self.peek()? {
+            FTok::Sub => {
+                self.pos += 1;
+                Some(-self.factor()?)
+            }
+            FTok::LParen => {
+                self.pos += 1;
+                let v = self.expr()?;
+                if self.peek() != Some(&FTok::RParen) {
+                    return None;
+                }
+                self.pos += 1;
+                Some(v)
+            }
+            FTok::Num(n) => {
+                let v = *n;
+                self.pos += 1;
+                Some(v)
+            }
+            FTok::Name(name) => {
+                let v = *self.bindings.get(name)?;
+                self.pos += 1;
+                Some(v)
+            }
+            _ => None,
+        }
+    }
 }

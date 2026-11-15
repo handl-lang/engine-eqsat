@@ -833,6 +833,113 @@
   {
     "bound_norm": "spectral",
     "cert": null,
+    "cond": [
+      "const-cmp",
+      "ONE",
+      "==",
+      1
+    ],
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "1 / sqrt(x) = rsqrt(x): the two-op reciprocal-root spelling folds to the dispatched kernel — the canonical form the RMSNorm fold's pattern pins.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "ONE"
+        },
+        {
+          "args": [
+            {
+              "mvar": "u"
+            }
+          ],
+          "attrs": null,
+          "dim": null,
+          "lit": null,
+          "op": "sqrt",
+          "source": "native"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "div",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "div_sqrt_to_rsqrt",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "u"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "rsqrt",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
+    "cond": [
+      "const-cmp",
+      "P",
+      "==",
+      -0.5
+    ],
+    "derivation": [],
+    "dspec": null,
+    "error_bound": null,
+    "kind": "law",
+    "law": "pow(x, -0.5) = rsqrt(x): the negative-half-power spelling folds to the dispatched kernel — the same canonicalization as div_sqrt_to_rsqrt one op-family over.",
+    "lhs": {
+      "args": [
+        {
+          "mvar": "u"
+        },
+        {
+          "mvar": "P"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "pow",
+      "source": "native"
+    },
+    "missing_hooks": [],
+    "name": "pow_to_rsqrt",
+    "rhs": {
+      "args": [
+        {
+          "mvar": "u"
+        }
+      ],
+      "attrs": null,
+      "dim": null,
+      "lit": null,
+      "op": "rsqrt",
+      "source": "native"
+    },
+    "serializable": true,
+    "tags": [
+      "simplification"
+    ],
+    "version": 2
+  },
+  {
+    "bound_norm": "spectral",
+    "cert": null,
     "cond": null,
     "derivation": [],
     "dspec": null,

@@ -28,9 +28,22 @@ live in `handl-lang/host:project/reports/engine-eqsat-spike.md`.
   the bridge-encoding rules (dim = child slot 0 with LHS-root-dim
   inheritance on the RHS, exact-keyset attr matching, JSON-valued
   `Const` leaves).
-- `src/law.rs` — `Law` (`lhs -> rhs` + `law`/`tags` metadata) and
-  `LawError` (unbound RHS metavariable). **Unconditional only** — the
-  `cond.py` guard port is an open design question (spike §6.2).
+- `src/law.rs` — `Law` (`lhs -> rhs` + `law`/`tags`/`cond`/`dspec`
+  metadata) and `LawError` (unbound RHS metavariable, guard
+  refusals). `compile` wires declarative guards into
+  `Rewrite::with_check`/`with_derive`.
+- `src/guard.rs` — the `cond.py` guards-as-data interpreter over
+  `handl_egraph::BoundEnv`: attr/scalar predicates, the shape-reading
+  predicates (dispatched to `src/shape.rs`'s `pred` table), and the
+  non-shape `dspec` expr algebra. The flat-map/repeat pairing guards
+  and `tval`/`tapp` tensor channels refuse by name
+  (`GuardError::Unsupported`) — never approximated.
+- `src/shape.rs` — stage-2/3 shape inference: `Shape`
+  (`Tuple`/`Unknown`/`Invalid`, `None` extents for unproven dims) +
+  the `cond.py` shape-spec/predicate vocabulary + `broadcast`/
+  `matmul_shape`/`numel` helpers, ported from `mlopt_core.typing`.
+  `cost.rs` `{"flops": …}` formulas bind `out`/`o<i>`/`m`/`n`/`k`/
+  conv dims against it — `+∞` on anything unproven.
 - `src/builtin.rs` — the first law pack: `id_add`, `id_mul`,
   `double_neg`, `sub_to_add` (guard-free `SIMPLIFICATION_RULES`
   ports from `mlopt_core.laws.tensor`) + `reshape_flatten_demo` (the

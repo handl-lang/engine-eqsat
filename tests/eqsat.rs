@@ -835,3 +835,266 @@ fn law_lint_compile(law: &eqsat::Law) {
         &eqsat::SaturateOptions::spec(),
     );
 }
+
+// --- guarded laws: the stage-1 cond/dspec interpreter -------------------
+//
+//  `const-cmp`/`const-num` guards over bound Const leaves, `and`/`not`
+//  combinators, and `dspec` `$leaf:` mints — the `guard.rs` port of
+//  `cond.py`, exercised end-to-end through `saturate`.
+
+#[test]
+fn const_guards_fire_and_veto() {
+    let u = native_op("add", vec![kconst(json!(1)), kconst(json!(2))]);
+
+    // pow_one: pow(u, 1) → u — fires on Const(1), vetoes on Const(2)
+    // and on a non-Const exponent.
+    assert_fires(
+        &native_op("pow", vec![u.clone(), kconst(json!(1))]),
+        &builtin::pow_one(),
+        &u,
+    );
+    assert_no_fire(
+        &native_op("pow", vec![u.clone(), kconst(json!(2))]),
+        &builtin::pow_one(),
+    );
+    assert_no_fire(
+        &native_op(
+            "pow",
+            vec![u.clone(), native_op("neg", vec![kconst(json!(1))])],
+        ),
+        &builtin::pow_one(),
+    );
+
+    // pow_to_rsqrt / pow_half / pow_neg_one — the const-cmp family.
+    assert_fires(
+        &native_op("pow", vec![u.clone(), kconst(json!(-0.5))]),
+        &builtin::pow_to_rsqrt(),
+        &native_op("rsqrt", vec![u.clone()]),
+    );
+    assert_no_fire(
+        &native_op("pow", vec![u.clone(), kconst(json!(0.5))]),
+        &builtin::pow_to_rsqrt(),
+    );
+    assert_fires(
+        &native_op("pow", vec![u.clone(), kconst(json!(0.5))]),
+        &builtin::pow_half(),
+        &native_op("sqrt", vec![u.clone()]),
+    );
+    // pow_neg_one: the const-num base guard vetoes an int-typed base.
+    assert_fires(
+        &native_op("pow", vec![u.clone(), kconst(json!(-1))]),
+        &builtin::pow_neg_one(),
+        &native_op("reciprocal", vec![u.clone()]),
+    );
+    assert_no_fire(
+        &native_op("pow", vec![kconst(json!(2)), kconst(json!(-1))]),
+        &builtin::pow_neg_one(),
+    );
+    assert_no_fire(
+        &native_op("pow", vec![kconst(json!(2.0)), kconst(json!(-1))]),
+        &builtin::pow_neg_one(),
+    );
+
+    // div_sqrt_to_rsqrt / div_one_recip — the ONE-pinned folds.
+    assert_fires(
+        &native_op(
+            "div",
+            vec![kconst(json!(1)), native_op("sqrt", vec![u.clone()])],
+        ),
+        &builtin::div_sqrt_to_rsqrt(),
+        &native_op("rsqrt", vec![u.clone()]),
+    );
+    assert_no_fire(
+        &native_op(
+            "div",
+            vec![kconst(json!(2)), native_op("sqrt", vec![u.clone()])],
+        ),
+        &builtin::div_sqrt_to_rsqrt(),
+    );
+    assert_fires(
+        &native_op("div", vec![kconst(json!(1)), u.clone()]),
+        &builtin::div_one_recip(),
+        &native_op("reciprocal", vec![u.clone()]),
+    );
+    assert_no_fire(
+        &native_op("div", vec![kconst(json!(0)), u.clone()]),
+        &builtin::div_one_recip(),
+    );
+
+    // Activation folds — multi-const `and` guards.
+    let x = native_op("mul", vec![kconst(json!(3)), kconst(json!(4))]);
+    assert_fires(
+        &native_op(
+            "reciprocal",
+            vec![native_op(
+                "add",
+                vec![
+                    kconst(json!(1)),
+                    native_op("exp", vec![native_op("neg", vec![x.clone()])]),
+                ],
+            )],
+        ),
+        &builtin::sigmoid_fold(),
+        &native_op("sigmoid", vec![x.clone()]),
+    );
+    // ONE = 2 vetoes the fold.
+    assert_no_fire(
+        &native_op(
+            "reciprocal",
+            vec![native_op(
+                "add",
+                vec![
+                    kconst(json!(2)),
+                    native_op("exp", vec![native_op("neg", vec![x.clone()])]),
+                ],
+            )],
+        ),
+        &builtin::sigmoid_fold(),
+    );
+    assert_fires(
+        &native_op(
+            "div",
+            vec![
+                kconst(json!(1)),
+                native_op(
+                    "add",
+                    vec![
+                        kconst(json!(1)),
+                        native_op("exp", vec![native_op("neg", vec![x.clone()])]),
+                    ],
+                ),
+            ],
+        ),
+        &builtin::sigmoid_fold_div(),
+        &native_op("sigmoid", vec![x.clone()]),
+    );
+    assert_fires(
+        &native_op(
+            "sub",
+            vec![
+                native_op(
+                    "mul",
+                    vec![
+                        kconst(json!(2)),
+                        native_op(
+                            "sigmoid",
+                            vec![native_op("mul", vec![kconst(json!(2)), x.clone()])],
+                        ),
+                    ],
+                ),
+                kconst(json!(1)),
+            ],
+        ),
+        &builtin::tanh_fold(),
+        &native_op("tanh", vec![x.clone()]),
+    );
+    assert_fires(
+        &native_op(
+            "div",
+            vec![
+                native_op(
+                    "relu6",
+                    vec![native_op("add", vec![x.clone(), kconst(json!(3))])],
+                ),
+                kconst(json!(6)),
+            ],
+        ),
+        &builtin::hardsigmoid_fold(),
+        &native_op("hardsigmoid", vec![x.clone()]),
+    );
+    // THREE = 4 vetoes hardsigmoid_fold.
+    assert_no_fire(
+        &native_op(
+            "div",
+            vec![
+                native_op(
+                    "relu6",
+                    vec![native_op("add", vec![x.clone(), kconst(json!(4))])],
+                ),
+                kconst(json!(6)),
+            ],
+        ),
+        &builtin::hardsigmoid_fold(),
+    );
+}
+
+#[test]
+fn dspec_leaf_mints_fire_and_veto() {
+    let u = native_op("add", vec![kconst(json!(1)), kconst(json!(2))]);
+
+    // neg_const: neg(Const(3)) → Const(-3) minted through $leaf:.
+    assert_fires(
+        &native_op("neg", vec![kconst(json!(3))]),
+        &builtin::neg_const(),
+        &kconst(json!(-3)),
+    );
+    // A non-Const operand vetoes const-num — no mint, no fire.
+    assert_no_fire(&native_op("neg", vec![u.clone()]), &builtin::neg_const());
+
+    // sub_const_sub: (u−2)−3 → u−5.
+    assert_fires(
+        &native_op(
+            "sub",
+            vec![
+                native_op("sub", vec![u.clone(), kconst(json!(2))]),
+                kconst(json!(3)),
+            ],
+        ),
+        &builtin::sub_const_sub(),
+        &native_op("sub", vec![u.clone(), kconst(json!(5))]),
+    );
+    // A non-Const inner operand vetoes.
+    assert_no_fire(
+        &native_op(
+            "sub",
+            vec![
+                native_op(
+                    "sub",
+                    vec![u.clone(), native_op("neg", vec![kconst(json!(2))])],
+                ),
+                kconst(json!(3)),
+            ],
+        ),
+        &builtin::sub_const_sub(),
+    );
+
+    // div_const_to_mul: u/2 → u·0.5 — and u/0 vetoes (const-cmp ≠ 0).
+    assert_fires(
+        &native_op("div", vec![u.clone(), kconst(json!(2))]),
+        &builtin::div_const_to_mul(),
+        &native_op("mul", vec![u.clone(), kconst(json!(0.5))]),
+    );
+    assert_no_fire(
+        &native_op("div", vec![u.clone(), kconst(json!(0))]),
+        &builtin::div_const_to_mul(),
+    );
+
+    // mul_const_assoc_0: (u·2)·3 → u·6.
+    assert_fires(
+        &native_op(
+            "mul",
+            vec![
+                native_op("mul", vec![u.clone(), kconst(json!(2))]),
+                kconst(json!(3)),
+            ],
+        ),
+        &builtin::prior_art()
+            .into_iter()
+            .find(|l| l.name == "mul_const_assoc_0")
+            .expect("mul_const_assoc_0 in prior_art"),
+        &native_op("mul", vec![u.clone(), kconst(json!(6))]),
+    );
+
+    // mul_const_div: (u/2)·3 → u·1.5.
+    assert_fires(
+        &native_op(
+            "mul",
+            vec![
+                native_op("div", vec![u.clone(), kconst(json!(2))]),
+                kconst(json!(3)),
+            ],
+        ),
+        &builtin::mul_const_div(),
+        &native_op("mul", vec![u.clone(), kconst(json!(1.5))]),
+    );
+}

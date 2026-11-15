@@ -9,10 +9,14 @@
 //! `mlopt_core.laws.serialize`. Patterns are spelled in the [`Pat`]
 //! authoring view — never the compiled bridge encoding.
 //!
-//! Guards are **deferred**: `cond`/`dspec` are carried as raw JSON
-//! trees (stage-2's `cond`/`dspec` interpreter is not landed), so a
-//! law that has them loads but [`Law::compile`] refuses with
-//! [`LawError::GuardDeferred`] — firing without the side condition
+//! Guards are **interpreted**: `cond`/`dspec` are the declarative
+//! guard trees of [`crate::guard`] (the stage-1 `cond.py` port over
+//! [`handl_egraph::BoundEnv`]) — [`Law::compile`] parses them into
+//! `Rewrite::with_check`/`with_derive` hooks, so a guarded law fires
+//! only when its side condition holds. A guard the stage-1
+//! vocabulary does not cover — an unported guard op
+//! or a malformed node — refuses with [`LawError::GuardUnsupported`]/
+//! [`LawError::GuardMalformed`]: firing without the side condition
 //! would be a silent weakening. Likewise `serializable: false` or a
 //! non-empty `missing_hooks` refuses with
 //! [`LawError::Unserializable`]: the record's honesty flags port
@@ -47,12 +51,12 @@ pub struct Law {
     /// Intrinsic classification tags (symmetry / expansive / fusion /
     /// …) — domain metadata carried opaquely, like `Rewrite::tags`.
     pub tags: BTreeSet<String>,
-    /// The `cond` side-condition tree, **deferred**: carried as the
-    /// raw JSON the record stores, interpreted by the stage-2 guard
-    /// port. `Some` refuses [`Law::compile`] with
-    /// [`LawError::GuardDeferred`] — never silently dropped.
+    /// The `cond` side-condition tree — the declarative guard of
+    /// [`crate::guard::Cond`], carried as the raw JSON the record
+    /// stores and interpreted by [`Law::compile`].
     pub cond: Option<Value>,
-    /// The `dspec` derive-spec tree, deferred like [`Law::cond`].
+    /// The `dspec` derive-spec tree — the declarative derive of
+    /// [`crate::guard::Dspec`], interpreted like [`Law::cond`].
     pub dspec: Option<Value>,
     /// The recorded derivation chain (record-level provenance — the
     /// `Rewrite` carries no such field; it round-trips through the
@@ -83,14 +87,23 @@ pub enum LawError {
     /// The RHS mentions a metavariable the LHS never binds — the
     /// rewrite could not instantiate it.
     UnboundRhsVar(String),
-    /// The law carries a `cond`/`dspec` guard as deferred data and
-    /// the stage-1 interpreter does not exist — firing would silently
-    /// drop the side condition.
-    GuardDeferred {
+    /// The law's `cond`/`dspec` names an op the guard interpreter
+    /// does not cover — a flat-map/repeat pairing guard or a
+    /// tensor-backend channel. Firing would silently drop the side
+    /// condition.
+    GuardUnsupported {
         /// The law's name.
         law: String,
-        /// Which deferred field is present (`"cond"`/`"dspec"`).
-        field: &'static str,
+        /// What the interpreter refused (the op and why).
+        detail: String,
+    },
+    /// The law's `cond`/`dspec` tree is malformed — a bad node
+    /// shape, arity, literal type, or an undefined op name.
+    GuardMalformed {
+        /// The law's name.
+        law: String,
+        /// What was malformed.
+        detail: String,
     },
     /// The record flagged itself non-serializable (`serializable:
     /// false` or non-empty `missing_hooks`) — procedural hooks the
@@ -109,10 +122,12 @@ impl std::fmt::Display for LawError {
             LawError::UnboundRhsVar(name) => {
                 write!(f, "RHS metavariable '{name}' is not bound by the LHS")
             }
-            LawError::GuardDeferred { law, field } => write!(
-                f,
-                "law '{law}' carries a deferred {field} guard — no stage-1 interpreter"
-            ),
+            LawError::GuardUnsupported { law, detail } => {
+                write!(f, "law '{law}' guard unsupported: {detail}")
+            }
+            LawError::GuardMalformed { law, detail } => {
+                write!(f, "law '{law}' guard malformed: {detail}")
+            }
             LawError::Unserializable { law, missing } => write!(
                 f,
                 "law '{law}' is not serializable (missing hooks: {})",
@@ -261,16 +276,14 @@ impl Law {
         self
     }
 
-    /// Carry a deferred `cond` guard tree (raw record JSON — the
-    /// stage-2 interpreter reads it; [`Law::compile`] refuses while
-    /// set).
+    /// Carry a `cond` guard tree (raw record JSON — the
+    /// [`crate::guard`] interpreter reads it at [`Law::compile`]).
     pub fn with_cond(mut self, cond: impl Into<Value>) -> Law {
         self.cond = Some(cond.into());
         self
     }
 
-    /// Carry a deferred `dspec` derive-spec tree (see
-    /// [`Law::with_cond`]).
+    /// Carry a `dspec` derive-spec tree (see [`Law::with_cond`]).
     pub fn with_dspec(mut self, dspec: impl Into<Value>) -> Law {
         self.dspec = Some(dspec.into());
         self
@@ -300,7 +313,7 @@ impl Law {
     /// shape `mlopt_core.laws.serialize.law_to_data` emits, with the
     /// pattern pair in the [`Pat`] authoring view.
     ///
-    /// `cond`/`dspec` round-trip as the raw deferred trees;
+    /// `cond`/`dspec` round-trip as the raw guard trees;
     /// `serializable`/`missing_hooks` port verbatim.
     pub fn to_data(&self) -> Value {
         let mut rec = serde_json::Map::new();
@@ -363,9 +376,8 @@ impl Law {
 
     /// Decode a [`Law`] from its record form (see [`Law::to_data`]).
     ///
-    /// `cond`/`dspec` are stored **deferred** — the record's guard
-    /// trees are preserved verbatim for the stage-2 interpreter and
-    /// surface at [`Law::compile`] as [`LawError::GuardDeferred`].
+    /// `cond`/`dspec` are stored verbatim — the
+    /// [`crate::guard`] interpreter reads them at [`Law::compile`].
     /// `serializable`/`missing_hooks` are honoured: a flagged record
     /// loads (for inspection) but refuses to compile.
     ///
@@ -457,9 +469,11 @@ impl Law {
     /// * [`LawError::Unserializable`] — the record flagged procedural
     ///   hooks the data cannot carry (`serializable: false` or
     ///   `missing_hooks` non-empty).
-    /// * [`LawError::GuardDeferred`] — `cond`/`dspec` is present as
-    ///   deferred data; the stage-1 interpreter does not exist, so
-    ///   firing would silently drop the side condition.
+    /// * [`LawError::GuardUnsupported`] — `cond`/`dspec` names a
+    ///   guard op outside the ported vocabulary (the flat-map/repeat
+    ///   pairing guards and tensor-value channels).
+    /// * [`LawError::GuardMalformed`] — `cond`/`dspec` is not a
+    ///   well-formed guard tree.
     /// * [`LawError::UnboundRhsVar`] — the RHS names a metavariable
     ///   (term or attr) absent from the LHS.
     pub fn compile(&self) -> Result<Rewrite, LawError> {
@@ -469,16 +483,48 @@ impl Law {
                 missing: self.missing_hooks.iter().cloned().collect(),
             });
         }
-        for (field, guard) in [("cond", &self.cond), ("dspec", &self.dspec)] {
-            if guard.is_some() {
-                return Err(LawError::GuardDeferred {
-                    law: self.name.clone(),
-                    field,
-                });
-            }
-        }
+        // Parse the declarative guards once — a refusal here is a
+        // compile error, never an eval-time surprise.
+        let cond = self
+            .cond
+            .as_ref()
+            .map(|v| {
+                crate::guard::Cond::from_data(v).map_err(|e| match e {
+                    crate::guard::GuardError::Malformed(d) => LawError::GuardMalformed {
+                        law: self.name.clone(),
+                        detail: format!("cond: {d}"),
+                    },
+                    crate::guard::GuardError::Unsupported(d) => LawError::GuardUnsupported {
+                        law: self.name.clone(),
+                        detail: format!("cond: {d}"),
+                    },
+                })
+            })
+            .transpose()?;
+        let dspec = self
+            .dspec
+            .as_ref()
+            .map(|v| {
+                crate::guard::Dspec::from_data(v).map_err(|e| match e {
+                    crate::guard::GuardError::Malformed(d) => LawError::GuardMalformed {
+                        law: self.name.clone(),
+                        detail: format!("dspec: {d}"),
+                    },
+                    crate::guard::GuardError::Unsupported(d) => LawError::GuardUnsupported {
+                        law: self.name.clone(),
+                        detail: format!("dspec: {d}"),
+                    },
+                })
+            })
+            .transpose()?;
         let mut lhs_vars = BTreeSet::new();
         metavar_names(&self.lhs, &mut lhs_vars);
+        // `dspec` bindings count as bound — `$leaf:H` mints term
+        // metavar `H`, `$attr:X`/bare `X` binds attr metavar `X`
+        // (the Python `eval_derive` contract).
+        if let Some(d) = &dspec {
+            lhs_vars.extend(d.bound_vars());
+        }
         let mut rhs_vars = BTreeSet::new();
         metavar_names(&self.rhs, &mut rhs_vars);
         for name in &rhs_vars {
@@ -499,6 +545,15 @@ impl Law {
         rule.tags = self.tags.clone();
         rule.error_bound = self.error_bound;
         rule.bound_norm = self.bound_norm.clone();
+        // The declarative hooks — `check` before `derive`, the order
+        // `EGraph::apply_rule` runs them (a vetoed check never pays
+        // for the derive).
+        if let Some(c) = cond {
+            rule = rule.with_check(move |env| c.eval(env));
+        }
+        if let Some(d) = dspec {
+            rule = rule.with_derive(move |env| d.eval(env));
+        }
         Ok(rule)
     }
 }
