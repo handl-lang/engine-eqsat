@@ -31,6 +31,7 @@
 //! ```json
 //! {"ok": true, "name": "…", "term": <Term JSON|null>,
 //!  "cost": 0.0, "stats": {…}, "fired": ["law", …],
+//!  "rule_fires": {"law": <merge_count>, …},
 //!  "checks": [{"in_root": true}, …]}
 //! ```
 //!
@@ -150,6 +151,19 @@ fn fired_json(graph: &handl_egraph::EGraph) -> Value {
     json!(names)
 }
 
+/// Per-rule merge counts — the `{rule_name: merge_count}` record the
+/// Python `Engine` port's `rule_fires` reports (ADR-0178 WP3: the
+/// `engine="eqsat"` adapter surfaces this verbatim).
+fn rule_fires_json(graph: &handl_egraph::EGraph) -> Value {
+    let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for e in graph.merge_log() {
+        if let Some(r) = e.rule.as_deref() {
+            *counts.entry(r.to_string()).or_default() += 1;
+        }
+    }
+    json!(counts)
+}
+
 /// Run the spec; returns the report object.
 fn run(spec: &Value) -> Result<Value, RunError> {
     let terms = terms_of(spec.get("terms"), "terms")?;
@@ -201,6 +215,7 @@ fn run(spec: &Value) -> Result<Value, RunError> {
         "cost": cost_json,
         "stats": stats_json(&sat.stats),
         "fired": fired_json(&sat.graph),
+        "rule_fires": rule_fires_json(&sat.graph),
         "checks": checks,
     }))
 }
