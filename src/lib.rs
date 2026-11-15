@@ -125,4 +125,4 @@ pub use engine::{
 pub use guard::{Cond, Dspec, GuardError};
 pub use law::{LAW_FORMAT, Law, LawError, RecordError};
 pub use lawset::{LawSet, all_tags};
-pub use pat::{AttrsSpec, OpPat, Pat, PatError, PatSource};
+pub use pat::{AttrField, AttrsSpec, OpPat, Pat, PatError, PatSource};

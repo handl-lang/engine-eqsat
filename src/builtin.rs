@@ -1,59 +1,90 @@
-//! The law packs — unconditional ports of `mlopt_core`'s tensor law
-//! banks (`eqsat/packages/mlopt-core/src/mlopt_core/laws/tensor.py`),
+//! The law packs — ports of `mlopt_core`'s tensor law banks
+//! (`eqsat/packages/mlopt-core/src/mlopt_core/laws/tensor.py`),
 //! spelled in [`crate::pat`].
 //!
-//! These are the Python bank's laws whose guards fit the stage-1
-//! [`crate::guard`] vocabulary: the unguarded ports plus the
-//! `cond`/`dspec` members whose side conditions read only bound
-//! terms and attrs (the `const-cmp`/`const-num`/`attr-*` predicates
-//! and the scalar derive exprs). Laws whose guards read shapes —
-//! `shaped`/`rank`/`dim-eq`/`bcast-*`/`axes-*`, the `shape`/`dim`
-//! specs, `tval`/`tapp` — stay out: the shape predicates parse now
-//! ([`crate::shape::pred`]) but these members' guards also need the
-//! tensor-value channels / flat-map pairing guards that remain
-//! unported (design doc §2). Names, `law` strings, `cond`/`dspec`
-//! trees, and
-//! tag bundles are carried verbatim so provenance lines up with the
-//! Python bank (`mlopt_core.laws.tags`: `simplification` /
-//! `categorical` / `prior_art` / `symmetry` / `expansive` / `fusion`
-//! / `subsumed`).
+//! These are the Python bank's laws whose guards fit the ported
+//! [`crate::guard`]/[`crate::shape`] vocabulary: unguarded ports plus
+//! the `cond`/`dspec` members whose side conditions read bound terms,
+//! attrs, and the declarative shape table (`shaped`/`rank`/`dim-eq`/
+//! `bcast-*`/`axes-*`, the `shape`/`dim` specs, `tval`-free attr and
+//! scalar predicates). Laws needing the unported channels stay out —
+//! `tval`/`tapp` tensor values, the `shape`/`dim`/`leaf-dim` dspec
+//! channels, the `flat-map-unsq`/`repeat-*` pairing guards, and the
+//! procedural `check`/`derive` hooks (design doc §2). Each pack's doc
+//! comment carries its own census. Names, `law` strings,
+//! `cond`/`dspec` trees, and tag bundles are carried verbatim so
+//! provenance lines up with the Python bank (`mlopt_core.laws.tags`:
+//! `simplification` / `categorical` / `prior_art` / `symmetry` /
+//! `expansive` / `fusion` / `subsumed` / `attention`).
 //!
 //! Pack layout mirrors the Python collections:
 //!
-//! * [`simplification`] — the stage-1 members of
+//! * [`simplification`] — the portable members of
 //!   `SIMPLIFICATION_RULES` (monoid/group laws, the silu/square/pow
-//!   decompositions and folds, the rsqrt canonicalization,
-//!   `mul_div_swap`, `div_sqrt_to_rsqrt`, `pow_to_rsqrt`).
-//! * [`categorical`] — the stage-1 members of
-//!   `CATEGORICAL_RULES` (right-slot bilinearity, `assoc_matmul`,
-//!   the `linear` composition laws, `qkv_fuse`).
-//! * [`prior_art`] — the stage-1-portable slice of `PRIOR_ART_RULES`:
-//!   the const-algebra folds (`pow_*`, `*_const_*`, `neg_const`,
-//!   the `*_const_assoc_*` families) and the sigmoid/tanh/
-//!   hardsigmoid folds whose guards are `const-cmp` conjunctions.
+//!   decompositions and folds, the view-op strips/folds
+//!   (`select_mul`, `transpose_noop`, `chunk_single`, the
+//!   unsqueeze-pad family, `mul_reshape_inert_l`, `softmax_fold`,
+//!   `glu_fold`), the rsqrt canonicalization, `mul_div_swap`,
+//!   `matmul_div_distribute`, `div_add_factor`,
+//!   `div_sqrt_to_rsqrt`, `pow_to_rsqrt`).
+//! * [`categorical`] — the portable members of `CATEGORICAL_RULES`
+//!   (bilinearity and the weight-merge family, the `linear`
+//!   composition/scale laws, scalar naturality and `split_scalar_*`,
+//!   the product-structure fuses, `qkv_fuse`, the `sdpa_fold*`
+//!   family).
+//! * [`attention`] — the scaled slice of `SDPA_EXPAND_RULES` (the
+//!   opt-in `attention` preset's portable half).
+//! * [`prior_art`] — the portable slice of `PRIOR_ART_RULES`: the
+//!   const-algebra folds (`pow_*`, `*_const_*`, `neg_const`, the
+//!   `*_const_assoc_*` families) and the sigmoid/tanh/hardsigmoid
+//!   folds whose guards are `const-cmp` conjunctions.
 //!   Deliberately NOT in [`all`], mirroring the Python bank's
 //!   opt-in `prior_art` preset.
 //! * [`pointwise_factor`] — `POINTWISE_FACTOR_RULES`, the opt-in
 //!   Hadamard distributivity pair the Python bank deliberately keeps
 //!   out of `ALL_RULES` (a closure generator).
-//! * [`all`] — `simplification` + `categorical`, the stage-1 subset
+//! * [`all`] — `simplification` + `categorical`, the portable subset
 //!   of `ALL_RULES` (`all_rules()`).
 //!
 //! Scope note: the Python patterns live in the *typed* `Op` IR; here
 //! they are kernel `Term::Op`s — `dim` is child slot 0 (auto-bound,
 //! RHS inherits the root dim) and `Const` leaves are JSON-valued.
-//! Python attr *metavariables* (`scale="SC"`, `shape="S"`) have no
-//! per-key spelling on this surface: [`OpPat::attrs_bind`] binds the
-//! whole `__attrs__` payload, which is equivalent when the payload
-//! is the single attr the Python pattern names, and strictly more
-//! permissive when a node carries extra keys (the Python exact-
-//! keyset match would decline). [`OpPat::attrs_lit`] pins literal
+//! Python attr *metavariables* have two spellings on this surface:
+//! [`OpPat::attrs_bind`] binds the whole `__attrs__` payload (exact
+//! when the payload is the single attr the Python pattern names),
+//! and [`OpPat::attrs_fields`] spells the per-key contract —
+//! exact-keyset match, literal pins, and per-key attr metavariables —
+//! which `Law::compile` interprets through generated whole-payload
+//! metavariables plus `check`/`derive` hooks. [`OpPat::attrs_lit`]
+//! pins literal
 //! payloads exactly.
 
-use serde_json::json;
+use std::collections::BTreeMap;
+
+use serde_json::{Value, json};
 
 use crate::law::Law;
-use crate::pat::{OpPat, Pat};
+use crate::pat::{AttrField, OpPat, Pat};
+
+/// An [`AttrsSpec::Fields`](crate::pat::AttrsSpec::Fields) entry
+/// binding one attrs key to an attribute metavariable.
+fn af_bind(name: &str) -> AttrField {
+    AttrField::Bind(name.to_string())
+}
+
+/// An [`AttrsSpec::Fields`](crate::pat::AttrsSpec::Fields) entry
+/// pinning one attrs key to a literal JSON value.
+fn af_lit(value: serde_json::Value) -> AttrField {
+    AttrField::Lit(value)
+}
+
+/// Collect `(key, field)` pairs into the `attrs_fields` map.
+fn afields(entries: Vec<(&str, AttrField)>) -> BTreeMap<String, AttrField> {
+    entries
+        .into_iter()
+        .map(|(k, f)| (k.to_string(), f))
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 //  Monoid laws: commutativity & associativity  (tags: symmetry+expansive)
@@ -1341,19 +1372,1461 @@ pub fn mul_const_div() -> Law {
 }
 
 // ---------------------------------------------------------------------------
+//  Guarded tensor laws — the `cond`/`dspec` members of
+//  `SIMPLIFICATION_RULES`/`CATEGORICAL_RULES` whose guards fit the
+//  ported [`crate::guard`] vocabulary (attr predicates, the scalar
+//  expr algebra, and the [`crate::shape`] predicate/spec table).
+//  Attr metavariables ride [`OpPat::attrs_fields`] — the Python
+//  `Op.make(…, dim="D")` per-key spelling — which `Law::compile`
+//  interprets as exact-keyset match + per-field binding.
+// ---------------------------------------------------------------------------
+
+/// `select_mul`: `sel(u,D,I) ⊙ sel(v,D,I) → sel(u ⊙ v, D, I)` —
+/// elementwise mul commutes with select.
+///
+/// Python: `tensor.py` `SELECT_MUL`, cond
+/// `("and", ("dim-eq-attr","u","D","v","D"), ("shaped",("bcast","u","v")))`,
+/// tags `simplification`.
+pub fn select_mul() -> Law {
+    let sel = |t: Pat| {
+        Pat::Op(OpPat::new("select").arg(t).attrs_fields(afields(vec![
+            ("dim", af_bind("D")),
+            ("index", af_bind("I")),
+        ])))
+    };
+    Law::new(
+        "select_mul",
+        Pat::op("mul", vec![sel(Pat::var("u")), sel(Pat::var("v"))]),
+        sel(Pat::op("mul", vec![Pat::var("u"), Pat::var("v")])),
+    )
+    .with_law(
+        "mul commutes with select: sel(u) ⊙ sel(v) = sel(u ⊙ v) — the elementwise product of two slices is the slice of the product (naturality of the elementwise action over the select view).  Removes one dispatched op per site.",
+    )
+    .with_cond(json!([
+        "and",
+        ["dim-eq-attr", "u", "D", "v", "D"],
+        ["shaped", ["bcast", "u", "v"]]
+    ]))
+    .with_tag("simplification")
+}
+
+/// `transpose_noop`: `transpose(u, D0, D1) → u` when the swap axes
+/// coincide or both swapped extents are 1.
+///
+/// Python: `tensor.py` `TRANSPOSE_NOOP`, cond `("axes-noop","u","D0","D1")`,
+/// tags `simplification`.
+pub fn transpose_noop() -> Law {
+    Law::new(
+        "transpose_noop",
+        Pat::Op(
+            OpPat::new("transpose")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("dim0", af_bind("D0")),
+                    ("dim1", af_bind("D1")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "A transpose whose swap axes coincide (d0 == d1 mod rank) or whose swapped extents are both 1 is a semantic no-op — the stride permutation maps each position to itself; strip the view.",
+    )
+    .with_cond(json!(["axes-noop", "u", "D0", "D1"]))
+    .with_tag("simplification")
+}
+
+/// `chunk_single`: `chunk(u, chunks=1, …) → u`.
+///
+/// Python: `tensor.py` `CHUNK_SINGLE`, cond `("attr-eq","CK",1)`,
+/// tags `simplification`.
+pub fn chunk_single() -> Law {
+    Law::new(
+        "chunk_single",
+        Pat::Op(
+            OpPat::new("chunk")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("chunks", af_bind("CK")),
+                    ("dim", af_bind("CD")),
+                    ("index", af_bind("CI")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "chunk(u, chunks=1, dim, index) is u — a one-section partition returns the whole tensor unchanged.",
+    )
+    .with_cond(json!(["attr-eq", "CK", 1]))
+    .with_tag("simplification")
+}
+
+/// The broadcast-pad strip region for `op(unsqueeze(u, K), v)` —
+/// Python `_COND_UNSQ_PAD_L`.
+fn cond_unsq_pad_l() -> serde_json::Value {
+    json!([
+        "and",
+        ["bcast-eq", ["unsq-out", "u", "UD"], "v", "u", "v"],
+        ["bcast-into", "u", ["unsq-out", "u", "UD"]]
+    ])
+}
+
+/// The right-operand twin — Python `_COND_UNSQ_PAD_R`.
+fn cond_unsq_pad_r() -> serde_json::Value {
+    json!([
+        "and",
+        ["bcast-eq", ["unsq-out", "v", "UD"], "u", "v", "u"],
+        ["bcast-into", "v", ["unsq-out", "v", "UD"]]
+    ])
+}
+
+/// `unsqueeze(u, dim=UD)` — the view op with its axis attr bound.
+fn unsqueeze_u(var: &str) -> Pat {
+    Pat::Op(
+        OpPat::new("unsqueeze")
+            .arg(Pat::var(var))
+            .attrs_fields(afields(vec![("dim", af_bind("UD"))])),
+    )
+}
+
+/// `mul_unsq_pad_l`: `unsqueeze(u, d) · v → u · v` under the
+/// broadcast-pad grid guard.
+///
+/// Python: `tensor.py` `MUL_UNSQ_PAD_L`, tags `simplification`.
+pub fn mul_unsq_pad_l() -> Law {
+    Law::new(
+        "mul_unsq_pad_l",
+        Pat::op("mul", vec![unsqueeze_u("u"), Pat::var("v")]),
+        Pat::op("mul", vec![Pat::var("u"), Pat::var("v")]),
+    )
+    .with_law(
+        "unsqueeze(u, d) · v = u · v when the inserted axis is a broadcast pad and the broadcast grids coincide — the lifted operand reads the same positions, so the pad view is dead.  Drops one dispatched op per site (the exported ALiBi spelling carries it).",
+    )
+    .with_cond(cond_unsq_pad_l())
+    .with_tag("simplification")
+}
+
+/// `mul_unsq_pad_r`: `u · unsqueeze(v, d) → u · v` — right-operand
+/// twin of [`mul_unsq_pad_l`].
+///
+/// Python: `tensor.py` `MUL_UNSQ_PAD_R`, tags `simplification`.
+pub fn mul_unsq_pad_r() -> Law {
+    Law::new(
+        "mul_unsq_pad_r",
+        Pat::op("mul", vec![Pat::var("u"), unsqueeze_u("v")]),
+        Pat::op("mul", vec![Pat::var("u"), Pat::var("v")]),
+    )
+    .with_law(
+        "Right-operand twin of mul_unsq_pad_l: u · unsqueeze(v, d) = u · v under the same broadcast-pad grid guard.",
+    )
+    .with_cond(cond_unsq_pad_r())
+    .with_tag("simplification")
+}
+
+/// `sub_unsq_pad_l`: `unsqueeze(u, d) − v → u − v` under the same
+/// guard (the guard, not commutativity, carries it).
+///
+/// Python: `tensor.py` `SUB_UNSQ_PAD_L`, tags `simplification`.
+pub fn sub_unsq_pad_l() -> Law {
+    Law::new(
+        "sub_unsq_pad_l",
+        Pat::op("sub", vec![unsqueeze_u("u"), Pat::var("v")]),
+        Pat::op("sub", vec![Pat::var("u"), Pat::var("v")]),
+    )
+    .with_law(
+        "unsqueeze(u, d) - v = u - v under the broadcast-pad guard — same strip for the asymmetric operand pair (the guard, not the op's commutativity, is what carries it).",
+    )
+    .with_cond(cond_unsq_pad_l())
+    .with_tag("simplification")
+}
+
+/// `add_unsq_pad_r`: `u + unsqueeze(v, d) → u + v` — the add sibling
+/// of [`mul_unsq_pad_r`] (the intake-minted
+/// `mixed:add_unsqueeze_r_id` candidate).
+///
+/// Python: `tensor.py` `ADD_UNSQ_PAD_R`, tags `simplification`.
+pub fn add_unsq_pad_r() -> Law {
+    Law::new(
+        "add_unsq_pad_r",
+        Pat::op("add", vec![Pat::var("u"), unsqueeze_u("v")]),
+        Pat::op("add", vec![Pat::var("u"), Pat::var("v")]),
+    )
+    .with_law(
+        "u + unsqueeze(v, d) = u + v under the broadcast-pad grid guard — the add sibling of mul_unsq_pad_r: the lifted operand's pad view is dead when the broadcast grids coincide.  Minted by auto-cond from the intake census's ``mixed:add_unsqueeze_r_id`` candidate and admitted off a strictly-real paying site (``RelativePositionBias`` — see docs/results_realcorpus.md).",
+    )
+    .with_cond(cond_unsq_pad_r())
+    .with_tag("simplification")
+}
+
+/// `mul_reshape_inert_l`: `reshape(u, S) · v → u · v` when the
+/// reshape is broadcast-inert (equal broadcast grids).
+///
+/// Python: `tensor.py` `MUL_RESHAPE_INERT_L`, cond
+/// `("bcast-eq",("reshape-out","u","RS"),"v","u","v")`,
+/// tags `simplification`.
+pub fn mul_reshape_inert_l() -> Law {
+    Law::new(
+        "mul_reshape_inert_l",
+        Pat::op(
+            "mul",
+            vec![
+                Pat::Op(
+                    OpPat::new("reshape")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![("shape", af_bind("RS"))])),
+                ),
+                Pat::var("v"),
+            ],
+        ),
+        Pat::op("mul", vec![Pat::var("u"), Pat::var("v")]),
+    )
+    .with_law(
+        "reshape(u, S) · v = u · v when the reshape is broadcast-inert — equal broadcast grids force the reshape to a 1-axis insert/remove (a permuting reshape changes an extent and the grids disagree).  Grid equality is the minted single-clause guard.",
+    )
+    .with_cond(json!([
+        "bcast-eq",
+        ["reshape-out", "u", "RS"],
+        "v",
+        "u",
+        "v"
+    ]))
+    .with_tag("simplification")
+}
+
+/// `softmax_fold`: `exp(u) / Σ exp(u) → softmax(u)` — the
+/// manual-softmax fold; `keepdim`/`dim` guards plus the `attr0`
+/// dspec unwrapping `sum`'s `dim` tuple into `softmax`'s scalar dim.
+///
+/// Python: `tensor.py` `SOFTMAX_FOLD`, tags `simplification`.
+pub fn softmax_fold() -> Law {
+    Law::new(
+        "softmax_fold",
+        Pat::op(
+            "div",
+            vec![
+                Pat::op("exp", vec![Pat::var("u")]),
+                Pat::Op(
+                    OpPat::new("sum")
+                        .arg(Pat::op("exp", vec![Pat::var("u")]))
+                        .attrs_fields(afields(vec![
+                            ("dim", af_bind("RD")),
+                            ("keepdim", af_bind("RK")),
+                        ])),
+                ),
+            ],
+        ),
+        Pat::Op(
+            OpPat::new("softmax")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("dim", af_bind("SD"))])),
+        ),
+    )
+    .with_law(
+        "exp(u) / Σ exp(u) = softmax(u): the manual normalization fold — a composed-then-reduced chain IS the kernel's definition.  Folds div+exp+sum to one dispatched op.",
+    )
+    .with_cond(json!([
+        "and",
+        ["attr-is", "RK", true],
+        [
+            "or",
+            ["attr-type", "RD", "int"],
+            [
+                "and",
+                ["attr-type", "RD", "tuple"],
+                ["attr-len", "RD", "==", 1]
+            ]
+        ]
+    ]))
+    .with_dspec(json!({"SD": ["attr0", "RD"]}))
+    .with_tag("simplification")
+}
+
+/// `glu_fold`: `chunk-half · σ(chunk-half) → glu(u)` — the
+/// manual-GLU fold; the parity guard is `dim-mod` on the attr-named
+/// split axis.
+///
+/// Python: `tensor.py` `GLU_FOLD`, tags `simplification`.
+pub fn glu_fold() -> Law {
+    let chunk = |index: i64| {
+        Pat::Op(
+            OpPat::new("chunk")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("chunks", af_lit(json!(2))),
+                    ("dim", af_bind("D")),
+                    ("index", af_lit(json!(index))),
+                ])),
+        )
+    };
+    Law::new(
+        "glu_fold",
+        Pat::op(
+            "mul",
+            vec![chunk(0), Pat::op("sigmoid", vec![chunk(1)])],
+        ),
+        Pat::Op(
+            OpPat::new("glu")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+        ),
+    )
+    .with_law(
+        "chunk-half · σ(chunk-half) IS glu(u): the manual-GLU fold — a ⊗ σ(b) over the two equal halves of u IS the kernel's definition.  Folds mul+sigmoid+2 chunks to one dispatched op.",
+    )
+    .with_cond(json!([
+        "and",
+        ["rank", "u", ">=", 1],
+        ["dim-mod", "u", "D", 2, 0]
+    ]))
+    .with_tag("simplification")
+}
+
+/// `matmul_div_distribute`: `(a/c) @ v → (a @ v)/c` for scalar `c`.
+///
+/// Python: `tensor.py` `MATMUL_DIV_DISTRIBUTE`, cond `("scalar","c")`,
+/// tags `simplification`.
+pub fn matmul_div_distribute() -> Law {
+    Law::new(
+        "matmul_div_distribute",
+        Pat::op(
+            "matmul",
+            vec![Pat::op("div", vec![Pat::var("a"), Pat::var("c")]), Pat::var("v")],
+        ),
+        Pat::op(
+            "div",
+            vec![
+                Pat::op("matmul", vec![Pat::var("a"), Pat::var("v")]),
+                Pat::var("c"),
+            ],
+        ),
+    )
+    .with_law(
+        "(a/c)@v = (a@v)/c when c is scalar — linear readout of a scalar-denominated operand; the score scale exits the contraction.",
+    )
+    .with_cond(json!(["scalar", "c"]))
+    .with_tag("simplification")
+}
+
+/// `div_add_factor`: `x/c + y/c → (x+y)/c` for scalar `c`.
+///
+/// Python: `tensor.py` `DIV_ADD_FACTOR`, cond `("scalar","c")`,
+/// tags `simplification`.
+pub fn div_add_factor() -> Law {
+    Law::new(
+        "div_add_factor",
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("div", vec![Pat::var("x"), Pat::var("c")]),
+                Pat::op("div", vec![Pat::var("y"), Pat::var("c")]),
+            ],
+        ),
+        Pat::op(
+            "div",
+            vec![Pat::op("add", vec![Pat::var("x"), Pat::var("y")]), Pat::var("c")],
+        ),
+    )
+    .with_law(
+        "x/c + y/c = (x+y)/c — shared-denominator factoring over the additive monoid; the score scale exits the block sum the way it exited the contraction.",
+    )
+    .with_cond(json!(["scalar", "c"]))
+    .with_tag("simplification")
+}
+
+// ---------------------------------------------------------------------------
+//  Categorical guarded laws — bilinearity guards, the biased/scale
+//  naturality family, the product-structure fuses, and the sdpa fold.
+// ---------------------------------------------------------------------------
+
+/// Python `_COND_MM_ADDENDS` — the addend-alignment guard shared by
+/// `distribute_matmul_over_add`/`factor_matmul`.
+fn cond_mm_addends() -> serde_json::Value {
+    json!([
+        "or",
+        [
+            "and",
+            ["rank-eq", "a", "b"],
+            ["rank", "a", ">=", 1],
+            ["shape-eq", "a", "b"]
+        ],
+        [
+            "and",
+            ["rank", "a", ">=", 2],
+            ["rank", "b", ">=", 2],
+            ["dim-eq", "a", -2, "b", -2]
+        ]
+    ])
+}
+
+/// Python `_COND_MM_WEIGHTS` — the `matmul` weight-pair guard.
+fn cond_mm_weights() -> serde_json::Value {
+    json!([
+        "or",
+        [
+            "and",
+            ["rank-eq", "W", "W2"],
+            ["rank", "W", ">=", 1],
+            ["shape-eq", "W", "W2"]
+        ],
+        [
+            "and",
+            ["rank", "W", ">=", 2],
+            ["rank", "W2", ">=", 2],
+            ["dim-eq", "W", -2, "W2", -2]
+        ]
+    ])
+}
+
+/// Python `_COND_MM_WEIGHTS_LINEAR` — the `linear` spelling of the
+/// weight guard (contraction axis is `W[-1]`, the transpose's -2).
+fn cond_mm_weights_linear() -> serde_json::Value {
+    json!([
+        "or",
+        [
+            "and",
+            ["rank-eq", "W", "W2"],
+            ["rank", "W", ">=", 1],
+            ["shape-eq", "W", "W2"]
+        ],
+        [
+            "and",
+            ["rank", "W", ">=", 2],
+            ["rank", "W2", ">=", 2],
+            ["dim-eq", "W", -1, "W2", -1]
+        ]
+    ])
+}
+
+/// `distribute_matmul_over_add`: `matmul(W, a+b) → matmul(W,a) +
+/// matmul(W,b)` — left-slot bilinearity.
+///
+/// Python: `tensor.py` `DISTRIBUTE_MUL`, cond `_COND_MM_ADDENDS`,
+/// tags `categorical`+`expansive`.
+pub fn distribute_matmul_over_add() -> Law {
+    Law::new(
+        "distribute_matmul_over_add",
+        Pat::op(
+            "matmul",
+            vec![
+                Pat::var("W"),
+                Pat::op("add", vec![Pat::var("a"), Pat::var("b")]),
+            ],
+        ),
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("matmul", vec![Pat::var("W"), Pat::var("a")]),
+                Pat::op("matmul", vec![Pat::var("W"), Pat::var("b")]),
+            ],
+        ),
+    )
+    .with_law("Distributivity of linear maps over addition (bilinearity).")
+    .with_cond(cond_mm_addends())
+    .with_tag("categorical")
+    .with_tag("expansive")
+}
+
+/// `factor_matmul`: `matmul(W,a) + matmul(W,b) → matmul(W, a+b)` —
+/// factoring a shared left weight.
+///
+/// Python: `tensor.py` `FACTOR_MUL`, cond `_COND_MM_ADDENDS`,
+/// tags `categorical`+`expansive`, derivation
+/// `distribute_matmul_over_add`.
+pub fn factor_matmul() -> Law {
+    Law::new(
+        "factor_matmul",
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("matmul", vec![Pat::var("W"), Pat::var("a")]),
+                Pat::op("matmul", vec![Pat::var("W"), Pat::var("b")]),
+            ],
+        ),
+        Pat::op(
+            "matmul",
+            vec![
+                Pat::var("W"),
+                Pat::op("add", vec![Pat::var("a"), Pat::var("b")]),
+            ],
+        ),
+    )
+    .with_law("Factoring common linear maps (reverse distributivity).")
+    .with_cond(cond_mm_addends())
+    .with_derivation("distribute_matmul_over_add")
+    .with_tag("categorical")
+    .with_tag("expansive")
+}
+
+/// `weight_factor_matmul`: `x@W + x@W2 → x@(W+W2)` — the weight-merge
+/// rule (REDUNDANT alpha-duplicate of [`factor_matmul`], annotated
+/// not deleted, as in Python).
+///
+/// Python: `tensor.py` `WEIGHT_FACTOR`, cond `_COND_MM_WEIGHTS`,
+/// tags `categorical`+`expansive`+`redundant`, derivation
+/// `distribute_matmul_over_add`.
+pub fn weight_factor_matmul() -> Law {
+    Law::new(
+        "weight_factor_matmul",
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("matmul", vec![Pat::var("x"), Pat::var("W")]),
+                Pat::op("matmul", vec![Pat::var("x"), Pat::var("W2")]),
+            ],
+        ),
+        Pat::op(
+            "matmul",
+            vec![
+                Pat::var("x"),
+                Pat::op("add", vec![Pat::var("W"), Pat::var("W2")]),
+            ],
+        ),
+    )
+    .with_law("Merge shared-input projections: x@W1 + x@W2 = x@(W1+W2).")
+    .with_cond(cond_mm_weights())
+    .with_derivation("distribute_matmul_over_add")
+    .with_tag("categorical")
+    .with_tag("expansive")
+    .with_tag("redundant")
+}
+
+/// `weight_distribute_matmul`: `x@(W+W2) → x@W + x@W2` — the reverse
+/// weight merge.
+///
+/// Python: `tensor.py` `WEIGHT_DISTRIBUTE`, cond `_COND_MM_WEIGHTS`,
+/// tags `categorical`+`expansive`+`redundant`, derivation
+/// `distribute_matmul_over_add`.
+pub fn weight_distribute_matmul() -> Law {
+    Law::new(
+        "weight_distribute_matmul",
+        Pat::op(
+            "matmul",
+            vec![
+                Pat::var("x"),
+                Pat::op("add", vec![Pat::var("W"), Pat::var("W2")]),
+            ],
+        ),
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("matmul", vec![Pat::var("x"), Pat::var("W")]),
+                Pat::op("matmul", vec![Pat::var("x"), Pat::var("W2")]),
+            ],
+        ),
+    )
+    .with_law("Reverse weight merge (lets eqsat weigh fused vs split forms).")
+    .with_cond(cond_mm_weights())
+    .with_derivation("distribute_matmul_over_add")
+    .with_tag("categorical")
+    .with_tag("expansive")
+    .with_tag("redundant")
+}
+
+/// `weight_factor_linear`: `linear(x,W) + linear(x,W2) →
+/// linear(x, W+W2)` — the `nn.Linear` weight merge.
+///
+/// Python: `tensor.py` `WEIGHT_FACTOR_LINEAR`, cond
+/// `_COND_MM_WEIGHTS_LINEAR`, tags `categorical`+`expansive`,
+/// derivation `weight_distribute_linear`.
+pub fn weight_factor_linear() -> Law {
+    Law::new(
+        "weight_factor_linear",
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]),
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("W2")]),
+            ],
+        ),
+        Pat::op(
+            "linear",
+            vec![Pat::var("x"), Pat::op("add", vec![Pat::var("W"), Pat::var("W2")])],
+        ),
+    )
+    .with_law(
+        "Merge shared-input nn.Linears: linear(x,W1)+linear(x,W2) = linear(x, W1+W2)  (transpose distributes over +).",
+    )
+    .with_cond(cond_mm_weights_linear())
+    .with_derivation("weight_distribute_linear")
+    .with_tag("categorical")
+    .with_tag("expansive")
+}
+
+/// `weight_distribute_linear`: `linear(x, W+W2) → linear(x,W) +
+/// linear(x,W2)` — expand a merged `nn.Linear`.
+///
+/// Python: `tensor.py` `WEIGHT_DISTRIBUTE_LINEAR`, cond
+/// `_COND_MM_WEIGHTS_LINEAR`, tags `categorical`+`expansive`.
+pub fn weight_distribute_linear() -> Law {
+    Law::new(
+        "weight_distribute_linear",
+        Pat::op(
+            "linear",
+            vec![
+                Pat::var("x"),
+                Pat::op("add", vec![Pat::var("W"), Pat::var("W2")]),
+            ],
+        ),
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]),
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("W2")]),
+            ],
+        ),
+    )
+    .with_law("Expand a merged nn.Linear so eqsat can compare both forms.")
+    .with_cond(cond_mm_weights_linear())
+    .with_tag("categorical")
+    .with_tag("expansive")
+}
+
+/// Python `_COND_BIAS_COMPOSE` — the affine-compose shape guard.
+fn cond_bias_compose() -> serde_json::Value {
+    json!([
+        "and",
+        ["rank", "A", "==", 2],
+        ["rank", "B", "==", 2],
+        ["dim-eq", "B", 1, "A", 0],
+        ["rank", "b1", "==", 1],
+        ["dim-eq", "b1", 0, "A", 0],
+        [
+            "or",
+            ["scalar", "b2"],
+            ["and", ["rank", "b2", "==", 1], ["dim-eq", "b2", 0, "B", 0]]
+        ],
+        ["rank", "x", ">=", 1],
+        ["dim-eq", "x", -1, "A", 1]
+    ])
+}
+
+/// `assoc_linear_bias`: `linear(linear(x,A,b1),B,b2) →
+/// add(linear(x, B@A, B·b1), b2)` — affine-map composition.
+///
+/// Python: `tensor.py` `ASSOC_LINEAR_BIAS`, cond
+/// `_COND_BIAS_COMPOSE`, tags `categorical`+`expansive`.
+pub fn assoc_linear_bias() -> Law {
+    Law::new(
+        "assoc_linear_bias",
+        Pat::op(
+            "linear",
+            vec![
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("A"), Pat::var("b1")]),
+                Pat::var("B"),
+                Pat::var("b2"),
+            ],
+        ),
+        Pat::op(
+            "add",
+            vec![
+                Pat::op(
+                    "linear",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op("matmul", vec![Pat::var("B"), Pat::var("A")]),
+                        Pat::op("matmul", vec![Pat::var("B"), Pat::var("b1")]),
+                    ],
+                ),
+                Pat::var("b2"),
+            ],
+        ),
+    )
+    .with_law(
+        "Affine-map composition: (B,b2)∘(A,b1) = (BA, B·b1 + b2).  Fused weight is B @ A (same transpose flip as assoc_linear); the fused bias is spelled linear(x, BA, B·b1) + b2 so both B-products fold at compile time — one GEMM plus one broadcast add at runtime.",
+    )
+    .with_cond(cond_bias_compose())
+    .with_tag("categorical")
+    .with_tag("expansive")
+}
+
+/// `assoc_linear_bias_rev`: reverse affine composition.
+///
+/// Python: `tensor.py` `ASSOC_LINEAR_BIAS_REV`, cond
+/// `_COND_BIAS_COMPOSE`, tags `categorical`+`expansive`, derivation
+/// `assoc_linear_bias`.
+pub fn assoc_linear_bias_rev() -> Law {
+    Law::new(
+        "assoc_linear_bias_rev",
+        Pat::op(
+            "add",
+            vec![
+                Pat::op(
+                    "linear",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op("matmul", vec![Pat::var("B"), Pat::var("A")]),
+                        Pat::op("matmul", vec![Pat::var("B"), Pat::var("b1")]),
+                    ],
+                ),
+                Pat::var("b2"),
+            ],
+        ),
+        Pat::op(
+            "linear",
+            vec![
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("A"), Pat::var("b1")]),
+                Pat::var("B"),
+                Pat::var("b2"),
+            ],
+        ),
+    )
+    .with_law("Reverse affine composition (eqsat weighs fused vs split).")
+    .with_cond(cond_bias_compose())
+    .with_derivation("assoc_linear_bias")
+    .with_tag("categorical")
+    .with_tag("expansive")
+}
+
+/// `naturality_scalar`: `matmul(W, x∘c) → (W@x)∘c` for scalar `c`.
+///
+/// Python: `tensor.py` `NATURALITY_SCALAR`, cond `("scalar","c")`,
+/// tags `categorical`+`expansive`.
+pub fn naturality_scalar() -> Law {
+    Law::new(
+        "naturality_scalar",
+        Pat::op(
+            "matmul",
+            vec![
+                Pat::var("W"),
+                Pat::op("mul", vec![Pat::var("x"), Pat::var("c")]),
+            ],
+        ),
+        Pat::op(
+            "mul",
+            vec![
+                Pat::op("matmul", vec![Pat::var("W"), Pat::var("x")]),
+                Pat::var("c"),
+            ],
+        ),
+    )
+    .with_law("Naturality: scalar multiplication commutes with linear maps.")
+    .with_cond(json!(["scalar", "c"]))
+    .with_tag("categorical")
+    .with_tag("expansive")
+}
+
+/// `naturality_scalar_rev`: `(W@x)∘c → W@(x∘c)` — pull the scalar
+/// into the matmul's input.
+///
+/// Python: `tensor.py` `NATURALITY_SCALAR_REV`, cond `("scalar","c")`,
+/// tags `categorical`+`expansive`, derivation `naturality_scalar`.
+pub fn naturality_scalar_rev() -> Law {
+    Law::new(
+        "naturality_scalar_rev",
+        Pat::op(
+            "mul",
+            vec![
+                Pat::op("matmul", vec![Pat::var("W"), Pat::var("x")]),
+                Pat::var("c"),
+            ],
+        ),
+        Pat::op(
+            "matmul",
+            vec![
+                Pat::var("W"),
+                Pat::op("mul", vec![Pat::var("x"), Pat::var("c")]),
+            ],
+        ),
+    )
+    .with_law("Reverse naturality: pull scalar into the matmul's input.")
+    .with_cond(json!(["scalar", "c"]))
+    .with_derivation("naturality_scalar")
+    .with_tag("categorical")
+    .with_tag("expansive")
+}
+
+/// The `split_scalar_{op}_{l,r}` family — `split_D(f(x,c)) =
+/// f(split_D(x), c)` (and the left-scalar variant) for the four
+/// `POINTWISE_BINARY_OPS` (`add`/`div`/`mul`/`sub`), guarded by
+/// `("scalar","c")`.
+///
+/// Python: `tensor.py` `_split_scalar`/`SPLIT_SCALAR_RULES`, tags
+/// `categorical`+`expansive`, derivation `naturality_scalar`.
+fn split_scalar_rules() -> Vec<Law> {
+    let mut laws = Vec::new();
+    for op in ["add", "div", "mul", "sub"] {
+        for scalar_left in [false, true] {
+            let suf = if scalar_left { "l" } else { "r" };
+            let split_attrs = || {
+                afields(vec![
+                    ("sizes", af_bind("SZ")),
+                    ("dim", af_bind("D")),
+                    ("index", af_bind("I")),
+                ])
+            };
+            let split_of = |t: Pat| Pat::Op(OpPat::new("split").arg(t).attrs_fields(split_attrs()));
+            let (lhs, rhs) = if scalar_left {
+                (
+                    split_of(Pat::op(op, vec![Pat::var("c"), Pat::var("x")])),
+                    Pat::op(op, vec![Pat::var("c"), split_of(Pat::var("x"))]),
+                )
+            } else {
+                (
+                    split_of(Pat::op(op, vec![Pat::var("x"), Pat::var("c")])),
+                    Pat::op(op, vec![split_of(Pat::var("x")), Pat::var("c")]),
+                )
+            };
+            laws.push(
+                Law::new(format!("split_scalar_{op}_{suf}"), lhs, rhs)
+                    .with_law(format!(
+                        "split commutes with pointwise {op} when the other operand is scalar: the partition reads the same elementwise grid; the scalar accompanies every block unchanged."
+                    ))
+                    .with_cond(json!(["scalar", "c"]))
+                    .with_derivation("naturality_scalar")
+                    .with_tag("categorical")
+                    .with_tag("expansive"),
+            );
+        }
+    }
+    laws
+}
+
+/// Python `_COND_FUSE_PAIR` — the shared-weight-shape guard for the
+/// product-structure fuses.
+fn cond_fuse_pair() -> serde_json::Value {
+    json!([
+        "and",
+        ["shape-compat", "A", "B"],
+        ["rank", "A", ">=", 2],
+        ["rank", "B", ">=", 2]
+    ])
+}
+
+/// `concat(A, B, dim=0)` — the fused weight.
+fn fused_weight_ab() -> Pat {
+    Pat::Op(
+        OpPat::new("concat")
+            .arg(Pat::var("A"))
+            .arg(Pat::var("B"))
+            .attrs_lit(json!({"dim": 0})),
+    )
+}
+
+/// `linear(x, concat(A,B,dim=0))` — the fused GEMM.
+fn fused_linear() -> Pat {
+    Pat::op("linear", vec![Pat::var("x"), fused_weight_ab()])
+}
+
+/// `chunk(fused_linear, chunks=2, dim=-1, index=i)` — one projection.
+fn fused_chunk(index: i64) -> Pat {
+    Pat::Op(
+        OpPat::new("chunk")
+            .arg(fused_linear())
+            .attrs_lit(json!({"chunks": 2, "dim": -1, "index": index})),
+    )
+}
+
+/// `swiglu_fuse`: `silu(linear(x,A)) · linear(x,B) →
+/// silu(chunk0(fused)) · chunk1(fused)` — the product universal
+/// property (fused SwiGLU gate/up).
+///
+/// Python: `tensor.py` `SWIGLU_FUSE`, cond `_COND_FUSE_PAIR`, tags
+/// `fusion`+`subsumed`.
+pub fn swiglu_fuse() -> Law {
+    Law::new(
+        "swiglu_fuse",
+        Pat::op(
+            "mul",
+            vec![
+                Pat::op("silu", vec![Pat::op("linear", vec![Pat::var("x"), Pat::var("A")])]),
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("B")]),
+            ],
+        ),
+        Pat::op(
+            "mul",
+            vec![
+                Pat::op("silu", vec![fused_chunk(0)]),
+                fused_chunk(1),
+            ],
+        ),
+    )
+    .with_law(
+        "Product universal property: <f,g> = (f x g) . Delta.  Two projections of the same input are ONE GEMM into V x V, then project.  (Fused SwiGLU gate/up — MergedColumnParallelLinear.)",
+    )
+    .with_cond(cond_fuse_pair())
+    .with_tag("fusion")
+    .with_tag("subsumed")
+}
+
+/// `parallel_mul_fuse`: `linear(x,A) · linear(x,B) →
+/// chunk0(fused) · chunk1(fused)` — the gate-free pairing.
+///
+/// Python: `tensor.py` `PARALLEL_MUL_FUSE`, cond `_COND_FUSE_PAIR`,
+/// tags `fusion`+`subsumed`.
+pub fn parallel_mul_fuse() -> Law {
+    Law::new(
+        "parallel_mul_fuse",
+        Pat::op(
+            "mul",
+            vec![
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("A")]),
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("B")]),
+            ],
+        ),
+        Pat::op("mul", vec![fused_chunk(0), fused_chunk(1)]),
+    )
+    .with_law(
+        "Pairing without a gate nonlinearity: mul(<pi1 f>, <pi2 g>) recovers the parallel-product form.",
+    )
+    .with_cond(cond_fuse_pair())
+    .with_tag("fusion")
+    .with_tag("subsumed")
+}
+
+// ---------------------------------------------------------------------------
+//  Diagonal-scale naturality for `linear` — the RMSNorm-folding rules,
+//  and the sdpa fold/expand attention family.
+// ---------------------------------------------------------------------------
+
+/// Python `_SPEC_WT` — `F.linear`'s weight transpose as a shape spec
+/// (`transpose-out` with torch-default `None` axes).
+fn spec_wt() -> serde_json::Value {
+    json!(["transpose-out", "W", null, null])
+}
+
+/// Python `_COND_LINEAR_XW` — `linear(x, W)` is well-typed.
+fn cond_linear_xw() -> serde_json::Value {
+    json!(["mm-shape-ok", "x", spec_wt()])
+}
+
+/// Python `_COND_LINEAR_WT` — `F.linear`'s weight arity ceiling.
+fn cond_linear_wt() -> serde_json::Value {
+    json!(["rank", "W", "<=", 2])
+}
+
+/// Python `_SPEC_LINEAR_OUT` — `linear(x, W)`'s output shape.
+fn spec_linear_out() -> serde_json::Value {
+    json!(["mm-out", "x", spec_wt()])
+}
+
+/// Python `_COND_CHANNEL_SCALE` — the per-channel scale guard.
+fn cond_channel_scale() -> serde_json::Value {
+    json!([
+        "and",
+        cond_linear_xw(),
+        cond_linear_wt(),
+        ["shaped", "c"],
+        ["rank", "W", ">=", 1],
+        [
+            "or",
+            ["scalar", "c"],
+            ["and", ["dim-eq", "c", -1, "W", -1], ["ones-but-last", "c"]]
+        ]
+    ])
+}
+
+/// Python `_COND_ROW_SCALE` (var `r`) / `_COND_ROW_SCALE_C` (var `c`)
+/// — the per-row scale guard.
+fn cond_row_scale(var: &str) -> serde_json::Value {
+    json!([
+        "and",
+        ["or", ["scalar", var], ["dim-eq-const", var, -1, 1]],
+        ["bcast-into", var, spec_linear_out()],
+        cond_linear_wt()
+    ])
+}
+
+/// Python `_COND_CHANNEL_TO_ROW` — the guarded composite's
+/// transported precondition.
+fn cond_channel_to_row() -> serde_json::Value {
+    json!(["and", cond_channel_scale(), cond_row_scale("c")])
+}
+
+/// `linear_channel_scale`: `linear(x∘c, W) → linear(x, W∘c)` — a
+/// channel scale is a right diagonal absorbed at compile time.
+///
+/// Python: `tensor.py` `LINEAR_CHANNEL_SCALE`, cond
+/// `_COND_CHANNEL_SCALE`, tags `symmetry`+`expansive`.
+pub fn linear_channel_scale() -> Law {
+    Law::new(
+        "linear_channel_scale",
+        Pat::op(
+            "linear",
+            vec![Pat::op("mul", vec![Pat::var("x"), Pat::var("c")]), Pat::var("W")],
+        ),
+        Pat::op(
+            "linear",
+            vec![Pat::var("x"), Pat::op("mul", vec![Pat::var("W"), Pat::var("c")])],
+        ),
+    )
+    .with_law(
+        "Channel scale is a right diagonal: (xD)W = x(DW).  Folds the norm's affine gain into the weight at compile time.",
+    )
+    .with_cond(cond_channel_scale())
+    .with_tag("symmetry")
+    .with_tag("expansive")
+}
+
+/// `linear_channel_scale_rev`: `linear(x, W∘c) → linear(x∘c, W)` —
+/// unfold the absorbed channel scale.
+///
+/// Python: `tensor.py` `LINEAR_CHANNEL_SCALE_REV`, cond
+/// `_COND_CHANNEL_SCALE`, tags `symmetry`+`expansive`, derivation
+/// `linear_channel_scale`.
+pub fn linear_channel_scale_rev() -> Law {
+    Law::new(
+        "linear_channel_scale_rev",
+        Pat::op(
+            "linear",
+            vec![
+                Pat::var("x"),
+                Pat::op("mul", vec![Pat::var("W"), Pat::var("c")]),
+            ],
+        ),
+        Pat::op(
+            "linear",
+            vec![
+                Pat::op("mul", vec![Pat::var("x"), Pat::var("c")]),
+                Pat::var("W"),
+            ],
+        ),
+    )
+    .with_law("Reverse channel-scale fold (eqsat compares both forms).")
+    .with_cond(cond_channel_scale())
+    .with_derivation("linear_channel_scale")
+    .with_tag("symmetry")
+    .with_tag("expansive")
+}
+
+/// `linear_row_scale`: `linear(x∘r, W) → linear(x,W)∘r` — a row
+/// scale is a left diagonal commuting through the linear map.
+///
+/// Python: `tensor.py` `LINEAR_ROW_SCALE`, cond `_COND_ROW_SCALE`,
+/// tags `symmetry`+`expansive`.
+pub fn linear_row_scale() -> Law {
+    Law::new(
+        "linear_row_scale",
+        Pat::op(
+            "linear",
+            vec![Pat::op("mul", vec![Pat::var("x"), Pat::var("r")]), Pat::var("W")],
+        ),
+        Pat::op(
+            "mul",
+            vec![Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]), Pat::var("r")],
+        ),
+    )
+    .with_law(
+        "Row scale is a left diagonal: commutes through the linear map to the output (naturality of scalar action).",
+    )
+    .with_cond(cond_row_scale("r"))
+    .with_tag("symmetry")
+    .with_tag("expansive")
+}
+
+/// `linear_row_scale_rev`: `linear(x,W)∘r → linear(x∘r, W)` —
+/// reverse row-scale hoist.
+///
+/// Python: `tensor.py` `LINEAR_ROW_SCALE_REV`, cond
+/// `_COND_ROW_SCALE`, tags `symmetry`+`expansive`, derivation
+/// `linear_row_scale`.
+pub fn linear_row_scale_rev() -> Law {
+    Law::new(
+        "linear_row_scale_rev",
+        Pat::op(
+            "mul",
+            vec![
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]),
+                Pat::var("r"),
+            ],
+        ),
+        Pat::op(
+            "linear",
+            vec![
+                Pat::op("mul", vec![Pat::var("x"), Pat::var("r")]),
+                Pat::var("W"),
+            ],
+        ),
+    )
+    .with_law("Reverse row-scale hoist (eqsat compares both forms).")
+    .with_cond(cond_row_scale("r"))
+    .with_derivation("linear_row_scale")
+    .with_tag("symmetry")
+    .with_tag("expansive")
+}
+
+/// `linear_channel_to_row_scale`: `linear(x, W∘c) → c·linear(x,W)`
+/// — the guarded composite of `linear_channel_scale_rev` then
+/// `linear_row_scale`, premise-guarded.
+///
+/// Python: `tensor.py` `LINEAR_CHANNEL_TO_ROW_SCALE`, cond
+/// `_COND_CHANNEL_TO_ROW`, tags `categorical`, derivation
+/// `(linear_channel_scale_rev, linear_row_scale)`.
+pub fn linear_channel_to_row_scale() -> Law {
+    Law::new(
+        "linear_channel_to_row_scale",
+        Pat::op(
+            "linear",
+            vec![Pat::var("x"), Pat::op("mul", vec![Pat::var("W"), Pat::var("c")])],
+        ),
+        Pat::op(
+            "mul",
+            vec![Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]), Pat::var("c")],
+        ),
+    )
+    .with_law(
+        "linear(x, W∘c) = c·linear(x, W) — a channel scale folded into the weight migrates through the linear map and re-emerges as a row scale on the output (channel_scale_rev then row_scale, fused into one premise-guarded step).",
+    )
+    .with_cond(cond_channel_to_row())
+    .with_derivation("linear_channel_scale_rev")
+    .with_derivation("linear_row_scale")
+    .with_tag("categorical")
+}
+
+// ---------------------------------------------------------------------------
+//  The sdpa fold family — `softmax(qkᵀ·s [+mask])v → sdpa`, and the
+//  opt-in `sdpa_expand*` decompose family.
+// ---------------------------------------------------------------------------
+
+/// Python `_QK_SCORES` — `matmul(Q, transpose(K, TD1, TD2))`.
+fn qk_scores() -> Pat {
+    Pat::op(
+        "matmul",
+        vec![
+            Pat::var("Q"),
+            Pat::Op(
+                OpPat::new("transpose")
+                    .arg(Pat::var("K"))
+                    .attrs_fields(afields(vec![
+                        ("dim0", af_bind("TD1")),
+                        ("dim1", af_bind("TD2")),
+                    ])),
+            ),
+        ],
+    )
+}
+
+/// Python `_COND_SCORE_T` + `_COND_SM_DIM` + `_COND_SDPA_BASE`.
+fn cond_sdpa_base() -> serde_json::Value {
+    json!([
+        "and",
+        [
+            "and",
+            ["concrete", "K"],
+            ["attr-type", "TD1", "int"],
+            ["attr-type", "TD2", "int"],
+            ["axes-last2", "K", "TD1", "TD2"]
+        ],
+        ["axis", "Q", "SD", -1]
+    ])
+}
+
+/// Python `_COND_SDPA_SCALED` — `_COND_SDPA_BASE` + `("const-num","S")`.
+fn cond_sdpa_scaled() -> serde_json::Value {
+    json!(["and", cond_sdpa_base(), ["const-num", "S"]])
+}
+
+/// `softmax(<scores>, dim=SD)` — the spelled attention core.
+fn spelled_softmax(inner: Pat) -> Pat {
+    Pat::Op(
+        OpPat::new("softmax")
+            .arg(inner)
+            .attrs_fields(afields(vec![("dim", af_bind("SD"))])),
+    )
+}
+
+/// `dropout(<inner>, p=DP, train=DT)` — the eval-mode wrapper the
+/// export may carry around the softmax.
+fn spelled_dropout(inner: Pat) -> Pat {
+    Pat::Op(OpPat::new("dropout").arg(inner).attrs_fields(afields(vec![
+        ("p", af_bind("DP")),
+        ("train", af_bind("DT")),
+    ])))
+}
+
+/// One `sdpa_fold*` scaled spelling: name suffix, scores pattern,
+/// add-cond, masked-fill-cond, dspec.
+type SdpaScaledRow = (&'static str, fn() -> Pat, Value, Value, Value);
+
+/// The `sdpa_fold_add*`/`sdpa_fold_masked_fill*` family: the six
+/// mask/scale spellings × the optional dropout wrapper (12 laws),
+/// plus the three mask-free `sdpa_fold_*_nomask` laws — Python's
+/// `SDPA_FOLD_RULES`.
+fn sdpa_fold_rules() -> Vec<Law> {
+    let mut laws = Vec::new();
+    // (name suffix, scores pat, add-cond, masked-fill-cond, dspec)
+    let scaled: [SdpaScaledRow; 3] = [
+        (
+            "mul",
+            || Pat::op("mul", vec![qk_scores(), Pat::var("S")]),
+            cond_sdpa_scaled(),
+            json!([
+                "and",
+                cond_sdpa_base(),
+                ["const-cmp", "F", "<", -1e30],
+                ["const-num", "S"]
+            ]),
+            json!({"SC": ["float", ["const", "S"]]}),
+        ),
+        (
+            "div",
+            || Pat::op("div", vec![qk_scores(), Pat::var("S")]),
+            cond_sdpa_scaled(),
+            json!([
+                "and",
+                cond_sdpa_base(),
+                ["const-cmp", "F", "<", -1e30],
+                ["const-num", "S"]
+            ]),
+            json!({"SC": ["recip", ["float", ["const", "S"]]]}),
+        ),
+        (
+            "",
+            qk_scores,
+            cond_sdpa_base(),
+            json!(["and", cond_sdpa_base(), ["const-cmp", "F", "<", -1e30]]),
+            json!({"SC": 1.0}),
+        ),
+    ];
+    for (sname, scores, cond_add, cond_mf, dspec) in &scaled {
+        for (wname, wrap) in [
+            ("", spelled_softmax as fn(Pat) -> Pat),
+            ("_drop", |sm| spelled_dropout(spelled_softmax(sm))),
+        ] {
+            // add-mask form: matmul(softmax(add(scores, M)), V)
+            let lhs_add = Pat::op(
+                "matmul",
+                vec![
+                    wrap(Pat::op("add", vec![scores(), Pat::var("M")])),
+                    Pat::var("V"),
+                ],
+            );
+            let rhs_add = Pat::Op(
+                OpPat::new("sdpa")
+                    .arg(Pat::var("Q"))
+                    .arg(Pat::var("K"))
+                    .arg(Pat::var("V"))
+                    .arg(Pat::var("M"))
+                    .attrs_fields(afields(vec![("scale", af_bind("SC"))])),
+            );
+            laws.push(
+                Law::new(
+                    format!("sdpa_fold_add{sname}{wname}"),
+                    lhs_add,
+                    rhs_add,
+                )
+                .with_law(
+                    "softmax(qk^T s + m) v is sdpa — the additive mask is the kernel's attn_mask argument.",
+                )
+                .with_cond(cond_add.clone())
+                .with_dspec(dspec.clone())
+                .with_tag("fusion"),
+            );
+            // masked_fill form: matmul(softmax(masked_fill(scores, MK, F)), V)
+            let lhs_mf = Pat::op(
+                "matmul",
+                vec![
+                    wrap(Pat::op(
+                        "masked_fill",
+                        vec![scores(), Pat::var("MK"), Pat::var("F")],
+                    )),
+                    Pat::var("V"),
+                ],
+            );
+            let rhs_mf = Pat::Op(
+                OpPat::new("sdpa")
+                    .arg(Pat::var("Q"))
+                    .arg(Pat::var("K"))
+                    .arg(Pat::var("V"))
+                    .arg(Pat::op("logical_not", vec![Pat::var("MK")]))
+                    .attrs_fields(afields(vec![("scale", af_bind("SC"))])),
+            );
+            laws.push(
+                Law::new(
+                    format!("sdpa_fold_masked_fill{sname}{wname}"),
+                    lhs_mf,
+                    rhs_mf,
+                )
+                .with_law(
+                    "masked_fill(m, -inf) before softmax is a boolean attn_mask — logical_not turns the fill-mask into SDPA's keep-mask.",
+                )
+                .with_cond(cond_mf.clone())
+                .with_dspec(dspec.clone())
+                .with_tag("fusion"),
+            );
+        }
+    }
+    // The mask-free forms — `nn.MultiheadAttention`'s default export.
+    let qv_rank = json!(["rank", "Q", ">=", 2]);
+    let v_rank = json!(["rank", "V", ">=", 2]);
+    let nomask: [(&str, Pat, serde_json::Value, serde_json::Value, String); 3] = [
+        (
+            "sdpa_fold_nomask",
+            Pat::op("matmul", vec![spelled_softmax(qk_scores()), Pat::var("V")]),
+            json!(["and", cond_sdpa_base(), qv_rank.clone(), v_rank.clone()]),
+            json!({"SC": 1.0}),
+            "softmax(q kᵀ) v is sdpa(q, k, v, scale=1) — the mask-free spelled attention is one fused kernel (the add/masked_fill family's empty-mask row).".to_string(),
+        ),
+        (
+            "sdpa_fold_div_nomask",
+            Pat::op(
+                "matmul",
+                vec![
+                    spelled_softmax(Pat::op("div", vec![qk_scores(), Pat::var("S")])),
+                    Pat::var("V"),
+                ],
+            ),
+            json!([
+                "and",
+                cond_sdpa_scaled(),
+                qv_rank.clone(),
+                v_rank.clone()
+            ]),
+            json!({"SC": ["recip", ["float", ["const", "S"]]]}),
+            "softmax(q kᵀ / s) v is sdpa(q, k, v, scale=1/s) — the mask-free spelled form with the decomposed pre-softmax scale.".to_string(),
+        ),
+        (
+            "sdpa_fold_mul_nomask",
+            Pat::op(
+                "matmul",
+                vec![
+                    spelled_softmax(Pat::op("mul", vec![qk_scores(), Pat::var("S")])),
+                    Pat::var("V"),
+                ],
+            ),
+            json!([
+                "and",
+                cond_sdpa_scaled(),
+                qv_rank.clone(),
+                v_rank.clone()
+            ]),
+            json!({"SC": ["float", ["const", "S"]]}),
+            "softmax(q kᵀ · s) v is sdpa(q, k, v, scale=s) — the mul spelling of the mask-free scaled fold, and the re-fusion half of the sdpa_expand pair (the mediating inverse for the expand/fold critical pair, the silu_fold analogue).".to_string(),
+        ),
+    ];
+    for (name, lhs, cond, dspec, law) in nomask {
+        laws.push(
+            Law::new(
+                name,
+                lhs,
+                Pat::Op(
+                    OpPat::new("sdpa")
+                        .arg(Pat::var("Q"))
+                        .arg(Pat::var("K"))
+                        .arg(Pat::var("V"))
+                        .attrs_fields(afields(vec![("scale", af_bind("SC"))])),
+                ),
+            )
+            .with_law(law)
+            .with_cond(cond)
+            .with_dspec(dspec)
+            .with_tag("fusion"),
+        );
+    }
+    laws
+}
+
+/// The expanded interior every `sdpa_expand*` mints:
+/// `matmul(softmax(mul(matmul(Q, Kᵀ₋₂₋₁), SC0), dim=-1), V)`.
+fn sdpa_expanded() -> Pat {
+    Pat::op(
+        "matmul",
+        vec![
+            Pat::Op(
+                OpPat::new("softmax")
+                    .arg(Pat::op(
+                        "mul",
+                        vec![
+                            Pat::op(
+                                "matmul",
+                                vec![
+                                    Pat::var("Q"),
+                                    Pat::Op(
+                                        OpPat::new("transpose")
+                                            .arg(Pat::var("K"))
+                                            .attrs_lit(json!({"dim0": -2, "dim1": -1})),
+                                    ),
+                                ],
+                            ),
+                            Pat::var("SC0"),
+                        ],
+                    ))
+                    .attrs_lit(json!({"dim": -1})),
+            ),
+            Pat::var("V"),
+        ],
+    )
+}
+
+/// The `sdpa_expand*` family — the scaled key-sets only.  The four
+/// scale-free spellings (`{}`, `{dropout_p}`, `+is_causal`,
+/// `+enable_gqa`) need the implicit-scale mint `1/√(q[-1])`, whose
+/// dspec reads `("dim","Q",-1)` — the unported shape channel — so
+/// they stay out (the census in the module docs).
+///
+/// Python: `tensor.py` `_make_sdpa_expand_rules` /
+/// `SDPA_EXPAND_RULES`, opt-in `attention` preset, tag `attention`,
+/// derivation `sdpa_fold_mul_nomask`.
+fn sdpa_expand_rules() -> Vec<Law> {
+    // (suffix, attrs fields, law text)
+    type SdpaKeyset = (&'static str, Vec<(&'static str, AttrField)>, &'static str);
+    let keysets: [SdpaKeyset; 4] = [
+        (
+            "_s",
+            vec![("scale", af_bind("SC"))],
+            "sdpa(q, k, v, scale=s) IS matmul(softmax(mul(q @ kᵀ, s), dim=-1), v) — the kernel's definition, expanded so the interior becomes a redex for the scale-migration and spelled-attention laws (the decompose half of the expand/fold pair; refolds through sdpa_fold_mul_nomask / sdpa_fold_nomask).",
+        ),
+        (
+            "_ds",
+            vec![("dropout_p", af_lit(json!(0.0))), ("scale", af_bind("SC"))],
+            "sdpa(q, k, v, dropout_p=0, scale=s) IS matmul(softmax(mul(q @ kᵀ, s), dim=-1), v) — the retained-default spelling of the scaled expansion.",
+        ),
+        (
+            "_dcs",
+            vec![
+                ("dropout_p", af_lit(json!(0.0))),
+                ("is_causal", af_lit(json!(false))),
+                ("scale", af_bind("SC")),
+            ],
+            "sdpa(q, k, v, dropout_p=0, is_causal=False, scale=s) IS matmul(softmax(mul(q @ kᵀ, s), dim=-1), v) — the retained-default spelling of the scaled expansion.",
+        ),
+        (
+            "_dcgs",
+            vec![
+                ("dropout_p", af_lit(json!(0.0))),
+                ("is_causal", af_lit(json!(false))),
+                ("enable_gqa", af_lit(json!(false))),
+                ("scale", af_bind("SC")),
+            ],
+            "sdpa(q, k, v, dropout_p=0, is_causal=False, enable_gqa=False, scale=s) IS matmul(softmax(mul(q @ kᵀ, s), dim=-1), v) — the retained-default spelling of the scaled expansion.",
+        ),
+    ];
+    keysets
+        .into_iter()
+        .map(|(suffix, fields, law)| {
+            Law::new(
+                format!("sdpa_expand{suffix}"),
+                Pat::Op(
+                    OpPat::new("sdpa")
+                        .arg(Pat::var("Q"))
+                        .arg(Pat::var("K"))
+                        .arg(Pat::var("V"))
+                        .attrs_fields(afields(fields)),
+                ),
+                sdpa_expanded(),
+            )
+            .with_law(law)
+            .with_dspec(json!({"$leaf:SC0": ["attr", "SC"]}))
+            .with_derivation("sdpa_fold_mul_nomask")
+            .with_tag("attention")
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 //  Law packs — mirror the Python bank collections.
 // ---------------------------------------------------------------------------
 
-/// The stage-1 members of `SIMPLIFICATION_RULES` (Python order):
-/// the monoid laws, the group identities, the decomposition /
-/// kernel-fold / rsqrt-canonicalization / div-mul-natural laws, and
-/// the two const-guarded folds (`div_sqrt_to_rsqrt`,
-/// `pow_to_rsqrt`). The remaining guarded members (`select_mul`,
-/// `transpose_noop`, `chunk_single`, the unsqueeze-pad strips,
-/// `mul_reshape_inert_l`, `mul_unsq_nat`, `softmax_fold`, `glu_fold`,
-/// `rms_norm_fold*`, `matmul_div_distribute`, `div_add_factor`)
-/// read shapes — their guards mix shape predicates with the
-/// unported flat-map/tensor channels, so they stay out of this pack.
+/// The members of `SIMPLIFICATION_RULES` (Python order): the
+/// monoid laws, the group identities, the decomposition /
+/// kernel-fold / rsqrt-canonicalization / div-mul-natural laws, the
+/// view-op strips and folds whose guards fit the ported vocabulary
+/// (`select_mul`, `transpose_noop`, `chunk_single`, the
+/// unsqueeze-pad family, `mul_reshape_inert_l`, `softmax_fold`,
+/// `glu_fold`, `matmul_div_distribute`, `div_add_factor`), and the
+/// two const-guarded folds (`div_sqrt_to_rsqrt`, `pow_to_rsqrt`).
+/// The remaining guarded members stay out: `mul_unsq_nat` needs the
+/// unported `flat-map-unsq` pairing guard; `rms_norm_fold`,
+/// `rms_norm_fold_nogain`, `batch_norm_expand*` need the
+/// `shape`/`dim`/`leaf-dim` dspec channels (no tensor backend).
 pub fn simplification() -> Vec<Law> {
     vec![
         comm_add(),
@@ -1372,31 +2845,82 @@ pub fn simplification() -> Vec<Law> {
         pow_to_square(),
         square_to_pow(),
         mul_square(),
+        select_mul(),
+        transpose_noop(),
+        chunk_single(),
+        mul_unsq_pad_l(),
+        mul_unsq_pad_r(),
+        sub_unsq_pad_l(),
+        add_unsq_pad_r(),
+        mul_reshape_inert_l(),
+        softmax_fold(),
+        glu_fold(),
         div_sqrt_to_rsqrt(),
         pow_to_rsqrt(),
         recip_sqrt_to_rsqrt(),
         mul_div_swap(),
+        matmul_div_distribute(),
+        div_add_factor(),
     ]
 }
 
-/// The guard-free members of `CATEGORICAL_RULES` (Python order):
-/// right-slot bilinearity, the `linear` composition laws, matmul /
-/// linear associativity, and `qkv_fuse`. The guarded members
-/// (`distribute_matmul_over_add`, `factor_matmul`, the weight-merge
-/// family, the scale naturality laws, the fuse family, `gqa_absorb`,
-/// the sdpa folds, and the minted composites) need `cond`/`dspec`
-/// hooks [`crate::law::Law`] does not carry yet.
+/// The members of `CATEGORICAL_RULES` (Python order): left/right
+/// bilinearity and the weight-merge family, the `linear` merge /
+/// composition / biased-compose laws, scalar naturality and the
+/// `split_scalar_*` lemmas, the product-structure fuses
+/// (`swiglu_fuse`, `parallel_mul_fuse`, `qkv_fuse`), the
+/// diagonal-scale naturality family, and the `sdpa_fold*` family.
+/// The remaining members stay out: `qkv_fuse_asym` needs the
+/// `leaf-dim` dspec channel; `gqa_absorb_repeat` needs the
+/// `repeat-chain`/`repeat-heads` pairing guards; `conv_bn_fold` and
+/// the `prim:synop*` minted records carry transported/procedural
+/// hooks (`missing_hooks`) and tensor-value channels.
 pub fn categorical() -> Vec<Law> {
-    vec![
+    let mut laws = vec![
+        distribute_matmul_over_add(),
+        factor_matmul(),
+        weight_factor_matmul(),
+        weight_distribute_matmul(),
+        weight_factor_linear(),
+        weight_distribute_linear(),
+    ];
+    laws.extend([
         right_distribute_matmul(),
         right_factor_matmul(),
         right_factor_linear(),
         assoc_linear(),
         assoc_linear_rev(),
+        assoc_linear_bias(),
+        assoc_linear_bias_rev(),
+        naturality_scalar(),
+        naturality_scalar_rev(),
         assoc_matmul(),
         assoc_matmul_rev(),
+    ]);
+    laws.extend(split_scalar_rules());
+    laws.extend([
+        swiglu_fuse(),
+        parallel_mul_fuse(),
         qkv_fuse(),
-    ]
+        linear_channel_scale(),
+        linear_channel_scale_rev(),
+        linear_row_scale(),
+        linear_row_scale_rev(),
+        linear_channel_to_row_scale(),
+    ]);
+    laws.extend(sdpa_fold_rules());
+    laws
+}
+
+/// The scaled slice of `SDPA_EXPAND_RULES` — the opt-in `attention`
+/// preset's portable half. The four scale-free spellings
+/// (`sdpa_expand`, `_d`, `_dc`, `_dcg`) mint the implicit scale
+/// `1/√(q[-1])` through the `("dim","Q",-1)` dspec channel —
+/// unported — so they stay out, as do `batch_norm_expand*` and the
+/// 42-law `conv_channel_*` family (`shape`/`dim` dspec channels and
+/// `attr-cmp` inline `dim`/`shape` exprs).
+pub fn attention() -> Vec<Law> {
+    sdpa_expand_rules()
 }
 
 /// The stage-1-portable slice of `PRIOR_ART_RULES` (Python order):

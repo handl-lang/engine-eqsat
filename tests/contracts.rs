@@ -605,13 +605,20 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     assert_eq!(pf.laws(), builtin::pointwise_factor().as_slice());
     assert_eq!(pf.compile().unwrap().len(), pf.laws().len());
 
+    // laws/attention.json — the opt-in scaled slice of
+    // SDPA_EXPAND_RULES (the scale-free key-sets need the unported
+    // `dim` dspec channel and stay out).
+    let att = LawSet::from_json(include_str!("../laws/attention.json")).unwrap();
+    assert_eq!(att.laws(), builtin::attention().as_slice());
+    assert_eq!(att.compile().unwrap().len(), att.laws().len());
+
     // laws/reshape_flatten_demo.json — the UNSOUND attrs-bind demo
     // (matcher coverage only; the `_demo` name is the warning).
     let flat = LawSet::from_json(include_str!("../laws/reshape_flatten_demo.json")).unwrap();
     assert_eq!(flat.laws(), &[builtin::reshape_flatten_demo()]);
 
     // And the records re-serialize byte-stably through the codec.
-    for set in [simpl, pa, cat, pf, flat] {
+    for set in [simpl, pa, cat, pf, att, flat] {
         let reloaded = LawSet::from_data(&set.to_data()).unwrap();
         assert_eq!(reloaded, set);
     }

@@ -22,12 +22,15 @@
 //! [`LawError::Unserializable`]: the record's honesty flags port
 //! verbatim and are honoured, not dropped.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
-use handl_egraph::Rewrite;
+use handl_egraph::{AttrValue, BoundEnv, Derived, Rewrite};
 use serde_json::Value;
 
-use crate::pat::{self, Ctx, Pat, PatError, Side, metavar_names, root_dim_var};
+use crate::pat::{
+    self, AttrBinding, AttrField, Ctx, Pat, PatError, Side, metavar_names, root_dim_var,
+};
 
 /// The law-record format version this codec reads and writes —
 /// `mlopt_core.laws.serialize.LAW_FORMAT`.
@@ -545,17 +548,141 @@ impl Law {
         rule.tags = self.tags.clone();
         rule.error_bound = self.error_bound;
         rule.bound_norm = self.bound_norm.clone();
+        let lhs_attrs: Vec<AttrBinding> = ctx
+            .attr_bindings
+            .iter()
+            .filter(|b| b.side == Side::Lhs)
+            .cloned()
+            .collect();
+        let rhs_attrs: Vec<AttrBinding> = ctx
+            .attr_bindings
+            .iter()
+            .filter(|b| b.side == Side::Rhs)
+            .cloned()
+            .collect();
         // The declarative hooks — `check` before `derive`, the order
         // `EGraph::apply_rule` runs them (a vetoed check never pays
-        // for the derive).
-        if let Some(c) = cond {
-            rule = rule.with_check(move |env| c.eval(env));
+        // for the derive). `AttrsSpec::Fields` adds its exact-keyset /
+        // literal / attr-metavar check to `check` and its RHS payload
+        // synthesis to `derive`.
+        if cond.is_some() || !lhs_attrs.is_empty() {
+            let check_attrs = lhs_attrs.clone();
+            rule = rule.with_check(move |env| {
+                let expanded;
+                let env = if check_attrs.is_empty() {
+                    env
+                } else {
+                    match expand_attr_fields(env, &check_attrs) {
+                        Some(e) => {
+                            expanded = e;
+                            &expanded
+                        }
+                        None => return false,
+                    }
+                };
+                match &cond {
+                    Some(c) => c.eval(env),
+                    None => true,
+                }
+            });
         }
-        if let Some(d) = dspec {
-            rule = rule.with_derive(move |env| d.eval(env));
+        if dspec.is_some() || !rhs_attrs.is_empty() {
+            let derive_attrs = lhs_attrs;
+            rule = rule.with_derive(move |env| {
+                let expanded;
+                let env = if derive_attrs.is_empty() {
+                    env
+                } else {
+                    match expand_attr_fields(env, &derive_attrs) {
+                        Some(e) => {
+                            expanded = e;
+                            &expanded
+                        }
+                        None => return None,
+                    }
+                };
+                let mut derived = match &dspec {
+                    Some(d) => d.eval(env)?,
+                    None => Vec::new(),
+                };
+                let mut attrs = env.attrs.clone();
+                for d in &derived {
+                    if let Derived::Attr(name, value) = d {
+                        attrs.insert(name.clone(), value.clone());
+                    }
+                }
+                for binding in &rhs_attrs {
+                    derived.push(synthesize_attr_payload(&attrs, binding)?);
+                }
+                Some(derived)
+            });
         }
         Ok(rule)
     }
+}
+
+/// Expand every LHS [`AttrsSpec::Fields`] payload into the shared
+/// attr-metavar namespace: exact keyset, literal pins, and bound
+/// fields must agree wherever they repeat (the Python `Op.make`
+/// per-key attr-metavariable contract the e-graph's top-level
+/// `TermAttr::Meta` cannot express directly).
+fn expand_attr_fields(env: &BoundEnv, bindings: &[AttrBinding]) -> Option<BoundEnv> {
+    let mut expanded = env.clone();
+    for binding in bindings {
+        let AttrValue::Object(fields) = env.attrs.get(binding.whole.as_ref())? else {
+            return None;
+        };
+        if fields.len() != binding.fields.len()
+            || !binding
+                .fields
+                .keys()
+                .all(|k| fields.contains_key(k.as_str()))
+        {
+            return None;
+        }
+        for (name, field) in &binding.fields {
+            let actual = fields.get(name.as_str())?;
+            match field {
+                AttrField::Lit(v) => {
+                    if !actual.match_eq(&AttrValue::from(v)) {
+                        return None;
+                    }
+                }
+                AttrField::Bind(mvar) => {
+                    let key = Rc::from(mvar.as_str());
+                    match expanded.attrs.get(&key) {
+                        Some(bound) if !bound.match_eq(actual) => return None,
+                        Some(_) => {}
+                        None => {
+                            expanded.attrs.insert(key, actual.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some(expanded)
+}
+
+/// Synthesize one RHS [`AttrsSpec::Fields`] payload from the
+/// post-`dspec` attr namespace — the `Derived::Attr` the compiled
+/// `__attrs__` metavariable needs for RHS instantiation.
+fn synthesize_attr_payload(
+    attrs: &BTreeMap<Rc<str>, AttrValue>,
+    binding: &AttrBinding,
+) -> Option<Derived> {
+    let mut object = BTreeMap::new();
+    for (name, field) in &binding.fields {
+        let value = match field {
+            AttrField::Lit(v) => AttrValue::from(v),
+            AttrField::Bind(mvar) => attrs.get(mvar.as_str())?.clone(),
+        };
+        object.insert(Rc::from(name.as_str()), value);
+    }
+    Some(Derived::Attr(
+        binding.whole.clone(),
+        AttrValue::Object(Rc::new(object)),
+    ))
 }
 
 /// Decode a [`Law`] from its record form — module-level spelling of

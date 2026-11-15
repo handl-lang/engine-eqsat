@@ -34,7 +34,7 @@
 //! * [`Pat::Const`] mints the bridge's self-describing leaf key — a
 //!   `Const` is matched by its JSON value, never by a raw string.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use handl_egraph::{AttrValue, KernelTerm, Term, TermAttr, attr, attr_meta, from_kernel};
@@ -88,6 +88,18 @@ pub enum PatSource {
     Dynamic,
 }
 
+/// One field of an [`AttrsSpec::Fields`] payload — either a literal
+/// pin or an attribute metavariable binding.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttrField {
+    /// Pin this attrs key to a literal JSON value.
+    Lit(Value),
+    /// Bind this attrs key to an attribute metavariable — the same
+    /// name reused on the RHS (or read by `cond`/`dspec`) carries the
+    /// bound value. Repeated uses must agree (`match_eq`).
+    Bind(String),
+}
+
 /// How a [`Pat::Op`]'s `attrs` payload (the kernel `Term::Op.attrs`
 /// `Value`, bridged under `"__attrs__"`) is treated.
 #[derive(Clone, Debug, PartialEq)]
@@ -97,6 +109,14 @@ pub enum AttrsSpec {
     /// Bind the whole payload to an attribute metavariable — re-emitted
     /// verbatim wherever the same name appears on a RHS.
     Bind(String),
+    /// Per-key spec: the payload must be an object whose keyset is
+    /// *exactly* the spec's keys; each key is literal-pinned or bound
+    /// to an attribute metavariable. This is the Python `Op.make`
+    /// per-key attr-metavariable contract — the e-graph's top-level
+    /// `TermAttr::Meta` cannot express it, so compilation mints a
+    /// whole-payload metavariable and [`crate::law`] interprets the
+    /// field spec in the `check`/`derive` hooks.
+    Fields(BTreeMap<String, AttrField>),
 }
 
 /// An op-application pattern: `op(args…)` in the kernel `Term::Op`
@@ -176,6 +196,12 @@ impl OpPat {
         self.attrs = Some(AttrsSpec::Bind(name.into()));
         self
     }
+
+    /// Spec the `attrs` payload per key — see [`AttrsSpec::Fields`].
+    pub fn attrs_fields(mut self, fields: BTreeMap<String, AttrField>) -> OpPat {
+        self.attrs = Some(AttrsSpec::Fields(fields));
+        self
+    }
 }
 
 /// Why a [`Pat`] failed to decode from its JSON record form.
@@ -188,7 +214,8 @@ pub enum PatError {
     /// The `source` tag is not one of
     /// `native`/`foreign`/`judgment`/`dynamic`.
     UnknownSource(String),
-    /// The `attrs` spec is not `null`, `{"lit": v}`, or `{"bind": n}`.
+    /// The `attrs` spec is not `null`, `{"lit": v}`, `{"bind": n}`, or
+    /// `{"fields": {key: {"lit"|"bind": …}}}`.
     UnknownAttrs(String),
 }
 
@@ -271,6 +298,18 @@ impl Pat {
                     match &op.attrs {
                         Some(AttrsSpec::Lit(v)) => serde_json::json!({"lit": v}),
                         Some(AttrsSpec::Bind(name)) => serde_json::json!({"bind": name}),
+                        Some(AttrsSpec::Fields(fields)) => serde_json::json!({
+                            "fields": fields
+                                .iter()
+                                .map(|(k, f)| {
+                                    let spec = match f {
+                                        AttrField::Lit(v) => serde_json::json!({"lit": v}),
+                                        AttrField::Bind(n) => serde_json::json!({"bind": n}),
+                                    };
+                                    (k.clone(), spec)
+                                })
+                                .collect::<serde_json::Map<String, Value>>(),
+                        }),
                         None => Value::Null,
                     },
                 );
@@ -350,6 +389,25 @@ fn op_pat_from_data(obj: &serde_json::Map<String, Value>) -> Result<Pat, PatErro
                     .as_str()
                     .ok_or_else(|| PatError::UnknownAttrs(format!("{v}")))?;
                 Some(AttrsSpec::Bind(name.to_string()))
+            } else if let Some(Value::Object(fields)) = spec.get("fields") {
+                let mut map = BTreeMap::new();
+                for (k, f) in fields {
+                    let fobj = f
+                        .as_object()
+                        .ok_or_else(|| PatError::UnknownAttrs(format!("{v}")))?;
+                    let field = if let Some(l) = fobj.get("lit") {
+                        AttrField::Lit(l.clone())
+                    } else if let Some(b) = fobj.get("bind") {
+                        let name = b
+                            .as_str()
+                            .ok_or_else(|| PatError::UnknownAttrs(format!("{v}")))?;
+                        AttrField::Bind(name.to_string())
+                    } else {
+                        return Err(PatError::UnknownAttrs(format!("{v}")));
+                    };
+                    map.insert(k.clone(), field);
+                }
+                Some(AttrsSpec::Fields(map))
             } else {
                 return Err(PatError::UnknownAttrs(format!("{v}")));
             }
@@ -367,7 +425,7 @@ fn op_pat_from_data(obj: &serde_json::Map<String, Value>) -> Result<Pat, PatErro
 
 /// Which side of a law a pattern compiles for — controls the `dim`
 /// default (see module docs).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Side {
     Lhs,
     Rhs,
@@ -381,6 +439,25 @@ pub(crate) struct Ctx {
     /// The metavariable name bound to the LHS root op's dim slot —
     /// `None` when the LHS root is not an op or pins a non-var dim.
     pub(crate) root_dim: Option<Rc<str>>,
+    /// Every [`AttrsSpec::Fields`] encountered while compiling this
+    /// law — [`crate::law`] interprets them in the `check`/`derive`
+    /// hooks (exact-keyset match on the LHS, payload synthesis on the
+    /// RHS).
+    pub(crate) attr_bindings: Vec<AttrBinding>,
+}
+
+/// One compiled [`AttrsSpec::Fields`] site: the generated
+/// whole-payload metavariable plus the per-key spec it stands for.
+#[derive(Clone, Debug)]
+pub(crate) struct AttrBinding {
+    /// Which side of the law this pattern sits on.
+    pub(crate) side: Side,
+    /// The generated metavariable the compiled `"__attrs__"` attr
+    /// carries — bound to the matched payload on the LHS, derived on
+    /// the RHS.
+    pub(crate) whole: Rc<str>,
+    /// The per-key spec (exact-keyset contract).
+    pub(crate) fields: BTreeMap<String, AttrField>,
 }
 
 impl Ctx {
@@ -388,6 +465,7 @@ impl Ctx {
         Ctx {
             fresh: 0,
             root_dim: None,
+            attr_bindings: Vec::new(),
         }
     }
 
@@ -446,6 +524,19 @@ pub(crate) fn compile(pat: &Pat, ctx: &mut Ctx, side: Side, is_root: bool) -> Te
             match &op.attrs {
                 Some(AttrsSpec::Lit(v)) => attrs.push(attr("__attrs__", AttrValue::from(v))),
                 Some(AttrsSpec::Bind(name)) => attrs.push(attr_meta("__attrs__", name)),
+                Some(AttrsSpec::Fields(fields)) => {
+                    // The per-key spec cannot ride `TermAttr::Meta`
+                    // (it binds one name, not a keyset) — mint a
+                    // whole-payload metavariable and let `law.rs`
+                    // check/synthesize the fields in the hooks.
+                    let whole = ctx.fresh();
+                    ctx.attr_bindings.push(AttrBinding {
+                        side,
+                        whole: whole.clone(),
+                        fields: fields.clone(),
+                    });
+                    attrs.push(attr_meta("__attrs__", whole.as_ref()));
+                }
                 None => {}
             }
             Term::op(op.op.as_str(), args, attrs)
@@ -490,8 +581,18 @@ pub(crate) fn metavar_names(pat: &Pat, out: &mut BTreeSet<String>) {
             if let Some(dim) = &op.dim {
                 metavar_names(dim, out);
             }
-            if let Some(AttrsSpec::Bind(name)) = &op.attrs {
-                out.insert(format!("$attr:{name}"));
+            match &op.attrs {
+                Some(AttrsSpec::Bind(name)) => {
+                    out.insert(format!("$attr:{name}"));
+                }
+                Some(AttrsSpec::Fields(fields)) => {
+                    for field in fields.values() {
+                        if let AttrField::Bind(name) = field {
+                            out.insert(format!("$attr:{name}"));
+                        }
+                    }
+                }
+                _ => {}
             }
             for a in &op.args {
                 metavar_names(a, out);

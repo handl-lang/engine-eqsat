@@ -44,10 +44,15 @@ live in `handl-lang/host:project/reports/engine-eqsat-spike.md`.
   `matmul_shape`/`numel` helpers, ported from `mlopt_core.typing`.
   `cost.rs` `{"flops": …}` formulas bind `out`/`o<i>`/`m`/`n`/`k`/
   conv dims against it — `+∞` on anything unproven.
-- `src/builtin.rs` — the first law pack: `id_add`, `id_mul`,
-  `double_neg`, `sub_to_add` (guard-free `SIMPLIFICATION_RULES`
-  ports from `mlopt_core.laws.tensor`) + `reshape_flatten_demo` (the
-  UNSOUND attrs-bind demo — matcher tests only, never a pack).
+- `src/builtin.rs` — the law packs ported from
+  `mlopt_core.laws.tensor`: `simplification`/`categorical`/`all`
+  (unguarded + `cond`/`dspec`-guarded members whose guards fit the
+  ported vocabulary, incl. the shape-table predicates and the
+  per-key `attrs_fields` attr metavariables), the opt-in
+  `prior_art`/`pointwise_factor`/`attention` presets, and
+  `reshape_flatten_demo` (the UNSOUND attrs-bind demo — matcher
+  tests only, never a pack). Each pack doc carries the census of
+  the Python members that stay out and why.
 - `src/engine.rs` — the public surface: `saturate`, `extract_best`,
   `optimize`, `size_cost`, `SaturateOptions`/`OptimizeOptions`/
   `StopPolicy`, `Saturated`/`OptimizeResult`, `Error`. Kernel

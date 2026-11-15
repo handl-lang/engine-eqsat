@@ -1098,3 +1098,379 @@ fn dspec_leaf_mints_fire_and_veto() {
         &native_op("mul", vec![u.clone(), kconst(json!(1.5))]),
     );
 }
+
+// --- guarded tensor laws (cond/dspec over attrs + the shape table) ----
+//
+// The `AttrsSpec::Fields` per-key attr metavariables compile to a
+// whole-payload `__attrs__` binding interpreted by `Law::compile`'s
+// check/derive hooks: exact keyset on the LHS, literal/bound-field
+// agreement, and synthesized payloads on the RHS. These tests pin
+// both the firing and the veto halves, plus the dspec derivations.
+
+/// A `{"__tensor__": …}` leaf — the wire value `shape::infer` reads a
+/// concrete shape off (a bare numeric const reports `()`).
+fn tensor(shape: &[i64]) -> KTerm {
+    kconst(json!({"__tensor__": {"shape": shape, "dtype": "f64"}}))
+}
+
+/// Fetch a generated pack member by name (`split_scalar_*`, `sdpa_*`).
+fn pack_law(pack: Vec<eqsat::Law>, name: &str) -> eqsat::Law {
+    pack.into_iter()
+        .find(|l| l.name == name)
+        .unwrap_or_else(|| panic!("{name} in pack"))
+}
+
+#[test]
+fn select_mul_fires_and_vetoes_on_shape_and_keyset() {
+    let law = builtin::select_mul();
+    let sel = |t: &KTerm, attrs: serde_json::Value| op_attrs("select", vec![t.clone()], attrs);
+    let dims = json!({"dim": 0, "index": 1});
+
+    // sel(u) ⊙ sel(v) → sel(u ⊙ v) when the select axes agree on both
+    // operands and the operands broadcast.
+    let (u, v) = (tensor(&[2, 4]), tensor(&[2, 4]));
+    let input = native_op("mul", vec![sel(&u, dims.clone()), sel(&v, dims.clone())]);
+    let expected = op_attrs("select", vec![native_op("mul", vec![u, v])], dims.clone());
+    assert_fires(&input, &law, &expected);
+
+    // `dim-eq-attr` veto: u[0]=1 vs v[0]=3 differ on the select axis —
+    // broadcast alone ([1,4]×[3,4] → [3,4]) would have allowed it.
+    let (u, v) = (tensor(&[1, 4]), tensor(&[3, 4]));
+    let input = native_op("mul", vec![sel(&u, dims.clone()), sel(&v, dims.clone())]);
+    assert_no_fire(&input, &law);
+
+    // Exact-keyset veto: an extra attr key declines the fields spec.
+    let extra = json!({"dim": 0, "index": 1, "keepdim": true});
+    let (u, v) = (tensor(&[2, 4]), tensor(&[2, 4]));
+    let input = native_op("mul", vec![sel(&u, extra), sel(&v, dims)]);
+    assert_no_fire(&input, &law);
+}
+
+#[test]
+fn transpose_noop_fires_and_vetoes() {
+    let law = builtin::transpose_noop();
+
+    // Same axis twice is a no-op on any rank ≥ 1.
+    let u = tensor(&[2, 4]);
+    let input = op_attrs("transpose", vec![u.clone()], json!({"dim0": 0, "dim1": 0}));
+    assert_fires(&input, &law, &u);
+
+    // Swapped extents both 1 is a no-op too.
+    let u = tensor(&[1, 1, 4]);
+    let input = op_attrs("transpose", vec![u.clone()], json!({"dim0": 0, "dim1": 1}));
+    assert_fires(&input, &law, &u);
+
+    // Veto: a real swap (2 ↔ 4) and a swap touching a non-1 extent.
+    let u = tensor(&[2, 4]);
+    let input = op_attrs("transpose", vec![u], json!({"dim0": 0, "dim1": 1}));
+    assert_no_fire(&input, &law);
+    let u = tensor(&[1, 4]);
+    let input = op_attrs("transpose", vec![u], json!({"dim0": 0, "dim1": 1}));
+    assert_no_fire(&input, &law);
+}
+
+#[test]
+fn chunk_single_fires_and_vetoes() {
+    let law = builtin::chunk_single();
+    let u = tensor(&[2, 4]);
+    let attrs = json!({"chunks": 1, "dim": 0, "index": 0});
+    let input = op_attrs("chunk", vec![u.clone()], attrs);
+    assert_fires(&input, &law, &u);
+
+    // chunks=2 is not the identity.
+    let input = op_attrs(
+        "chunk",
+        vec![u.clone()],
+        json!({"chunks": 2, "dim": 0, "index": 0}),
+    );
+    assert_no_fire(&input, &law);
+
+    // Missing `index` breaks the exact keyset.
+    let input = op_attrs("chunk", vec![u], json!({"chunks": 1, "dim": 0}));
+    assert_no_fire(&input, &law);
+}
+
+#[test]
+fn unsq_pad_family_fires_and_vetoes() {
+    // u=[4] lifted to [1,4] by unsqueeze(dim=0); v=[1,4] already
+    // carries the pad axis — the broadcast grids coincide, so the
+    // view is dead weight.
+    let (u, v) = (tensor(&[4]), tensor(&[1, 4]));
+    let lifted = |t: &KTerm| op_attrs("unsqueeze", vec![t.clone()], json!({"dim": 0}));
+
+    let input = native_op("mul", vec![lifted(&u), v.clone()]);
+    let expected = native_op("mul", vec![u.clone(), v.clone()]);
+    assert_fires(&input, &builtin::mul_unsq_pad_l(), &expected);
+
+    // Right-operand twin: mul(v, unsq(u)) → mul(v, u) — operand
+    // order is preserved (no commutativity in a single-law run).
+    let input = native_op("mul", vec![v.clone(), lifted(&u)]);
+    let expected_r = native_op("mul", vec![v.clone(), u.clone()]);
+    assert_fires(&input, &builtin::mul_unsq_pad_r(), &expected_r);
+
+    let input = native_op("sub", vec![lifted(&u), v.clone()]);
+    let expected_sub = native_op("sub", vec![u.clone(), v.clone()]);
+    assert_fires(&input, &builtin::sub_unsq_pad_l(), &expected_sub);
+
+    let input = native_op("add", vec![v.clone(), lifted(&u)]);
+    let expected_add = native_op("add", vec![v.clone(), u.clone()]);
+    assert_fires(&input, &builtin::add_unsq_pad_r(), &expected_add);
+
+    // Veto: v=[4] — bcast(unsq(u),v) = [1,4] but bcast(u,v) = [4],
+    // the grids disagree.
+    let (u, v) = (tensor(&[4]), tensor(&[4]));
+    let input = native_op("mul", vec![lifted(&u), v]);
+    assert_no_fire(&input, &builtin::mul_unsq_pad_l());
+}
+
+#[test]
+fn mul_reshape_inert_l_fires_and_vetoes() {
+    // reshape(u[4] → [1,4]) is broadcast-inert against v=[1,4].
+    let (u, v) = (tensor(&[4]), tensor(&[1, 4]));
+    let reshaped = op_attrs("reshape", vec![u.clone()], json!({"shape": [1, 4]}));
+    let input = native_op("mul", vec![reshaped, v.clone()]);
+    let expected = native_op("mul", vec![u, v]);
+    assert_fires(&input, &builtin::mul_reshape_inert_l(), &expected);
+
+    // Veto: reshape to [2,2] changes the broadcast grid.
+    let u = tensor(&[4]);
+    let v = tensor(&[1, 4]);
+    let reshaped = op_attrs("reshape", vec![u], json!({"shape": [2, 2]}));
+    let input = native_op("mul", vec![reshaped, v]);
+    assert_no_fire(&input, &builtin::mul_reshape_inert_l());
+}
+
+#[test]
+fn softmax_fold_fires_and_vetoes() {
+    let law = builtin::softmax_fold();
+    let u = tensor(&[2, 4]);
+    let manual = |dim: serde_json::Value| {
+        native_op(
+            "div",
+            vec![
+                native_op("exp", vec![u.clone()]),
+                op_attrs(
+                    "sum",
+                    vec![native_op("exp", vec![u.clone()])],
+                    json!({"dim": dim, "keepdim": true}),
+                ),
+            ],
+        )
+    };
+
+    // int dim → softmax(dim=-1).
+    let input = manual(json!(-1));
+    let expected = op_attrs("softmax", vec![u.clone()], json!({"dim": -1}));
+    assert_fires(&input, &law, &expected);
+
+    // 1-tuple dim unwraps through the `attr0` dspec to the same -1.
+    let input = manual(json!([-1]));
+    assert_fires(&input, &law, &expected);
+
+    // Veto: keepdim=false is not the softmax normalization.
+    let input = native_op(
+        "div",
+        vec![
+            native_op("exp", vec![u.clone()]),
+            op_attrs(
+                "sum",
+                vec![native_op("exp", vec![u])],
+                json!({"dim": -1, "keepdim": false}),
+            ),
+        ],
+    );
+    assert_no_fire(&input, &law);
+}
+
+#[test]
+fn glu_fold_fires_and_vetoes() {
+    let law = builtin::glu_fold();
+    let chunk = |u: &KTerm, index: i64| {
+        op_attrs(
+            "chunk",
+            vec![u.clone()],
+            json!({"chunks": 2, "dim": 1, "index": index}),
+        )
+    };
+    let input = |u: &KTerm| {
+        native_op(
+            "mul",
+            vec![chunk(u, 0), native_op("sigmoid", vec![chunk(u, 1)])],
+        )
+    };
+
+    // u=[2,4]: dim-1 extent 4 is even → glu(u, dim=1).
+    let u = tensor(&[2, 4]);
+    let expected = op_attrs("glu", vec![u.clone()], json!({"dim": 1}));
+    assert_fires(&input(&u), &law, &expected);
+
+    // Veto: dim-1 extent 3 is odd — no equal halves.
+    let u = tensor(&[2, 3]);
+    assert_no_fire(&input(&u), &law);
+
+    // Veto: a scalar u fails `rank >= 1`.
+    let u = kconst(json!(1.0));
+    assert_no_fire(&input(&u), &law);
+}
+
+#[test]
+fn naturality_scalar_fires_and_vetoes() {
+    let law = builtin::naturality_scalar();
+    let (w, x, c) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = native_op(
+        "matmul",
+        vec![w.clone(), native_op("mul", vec![x.clone(), c.clone()])],
+    );
+    let expected = native_op("mul", vec![native_op("matmul", vec![w, x]), c]);
+    assert_fires(&input, &law, &expected);
+
+    // Veto: a non-scalar "c" is not the naturality scalar.
+    let c = tensor(&[2]);
+    let input = native_op(
+        "matmul",
+        vec![
+            kconst(json!(1)),
+            native_op("mul", vec![kconst(json!(2)), c]),
+        ],
+    );
+    assert_no_fire(&input, &law);
+}
+
+#[test]
+fn split_scalar_mul_r_fires_and_vetoes() {
+    let law = pack_law(builtin::categorical(), "split_scalar_mul_r");
+    let attrs = json!({"sizes": [2], "dim": -1, "index": 0});
+    let (x, c) = (tensor(&[2, 4]), kconst(json!(0.5)));
+    let split_of = |t: KTerm| op_attrs("split", vec![t], attrs.clone());
+    let input = split_of(native_op("mul", vec![x.clone(), c.clone()]));
+    let expected = native_op("mul", vec![split_of(x), c]);
+    assert_fires(&input, &law, &expected);
+
+    // Veto: non-scalar c.
+    let c = tensor(&[4]);
+    let input = split_of(native_op("mul", vec![tensor(&[2, 4]), c]));
+    assert_no_fire(&input, &law);
+}
+
+#[test]
+fn linear_channel_scale_fires_and_vetoes() {
+    let law = builtin::linear_channel_scale();
+    // x=[4,3], W=[2,3] → Wᵀ=[3,2], x@Wᵀ=[4,2] well-typed; c scalar.
+    let (x, w, c) = (tensor(&[4, 3]), tensor(&[2, 3]), kconst(json!(2.0)));
+    let input = native_op(
+        "linear",
+        vec![native_op("mul", vec![x.clone(), c.clone()]), w.clone()],
+    );
+    let expected = native_op("linear", vec![x, native_op("mul", vec![w, c])]);
+    assert_fires(&input, &law, &expected);
+
+    // Veto: c=[3,3] is shaped but neither scalar nor a channel
+    // vector (dim-1 extent 3 ≠ W's 3? it IS 3 — but ones-but-last
+    // fails on the leading 3, and dim-eq alone is not enough).
+    let (x, w, c) = (tensor(&[4, 3]), tensor(&[2, 3]), tensor(&[3, 3]));
+    let input = native_op("linear", vec![native_op("mul", vec![x, c]), w]);
+    assert_no_fire(&input, &law);
+}
+
+#[test]
+fn sdpa_fold_mul_nomask_fires_and_vetoes() {
+    let law = pack_law(builtin::categorical(), "sdpa_fold_mul_nomask");
+    // K concrete rank-2, transpose dims = last-two axes; Q,V rank ≥ 2;
+    // softmax dim -1; S a numeric const.
+    let (q, k, v) = (tensor(&[4, 8]), tensor(&[4, 8]), tensor(&[4, 8]));
+    let scores = native_op(
+        "matmul",
+        vec![
+            q.clone(),
+            op_attrs(
+                "transpose",
+                vec![k.clone()],
+                json!({"dim0": -2, "dim1": -1}),
+            ),
+        ],
+    );
+    let input = native_op(
+        "matmul",
+        vec![
+            op_attrs(
+                "softmax",
+                vec![native_op("mul", vec![scores, kconst(json!(2))])],
+                json!({"dim": -1}),
+            ),
+            v.clone(),
+        ],
+    );
+    // dspec SC = float(const S) = 2.0 → sdpa(…, scale=2.0).
+    let expected = op_attrs("sdpa", vec![q, k, v], json!({"scale": 2.0}));
+    assert_fires(&input, &law, &expected);
+
+    // Veto: softmax dim 0 is not the score axis.
+    let scores = native_op(
+        "matmul",
+        vec![
+            tensor(&[4, 8]),
+            op_attrs(
+                "transpose",
+                vec![tensor(&[4, 8])],
+                json!({"dim0": -2, "dim1": -1}),
+            ),
+        ],
+    );
+    let input = native_op(
+        "matmul",
+        vec![
+            op_attrs(
+                "softmax",
+                vec![native_op("mul", vec![scores, kconst(json!(2))])],
+                json!({"dim": 0}),
+            ),
+            tensor(&[4, 8]),
+        ],
+    );
+    assert_no_fire(&input, &law);
+}
+
+#[test]
+fn sdpa_expand_s_fires_and_vetoes_on_keyset() {
+    let law = pack_law(builtin::attention(), "sdpa_expand_s");
+    let (q, k, v) = (kconst(json!(1)), kconst(json!(2)), kconst(json!(3)));
+    let input = op_attrs(
+        "sdpa",
+        vec![q.clone(), k.clone(), v.clone()],
+        json!({"scale": 0.5}),
+    );
+    // dspec $leaf:SC0 = attr SC → Const leaf 0.5 in the expanded mul.
+    let expected = native_op(
+        "matmul",
+        vec![
+            op_attrs(
+                "softmax",
+                vec![native_op(
+                    "mul",
+                    vec![
+                        native_op(
+                            "matmul",
+                            vec![
+                                q,
+                                op_attrs("transpose", vec![k], json!({"dim0": -2, "dim1": -1})),
+                            ],
+                        ),
+                        kconst(json!(0.5)),
+                    ],
+                )],
+                json!({"dim": -1}),
+            ),
+            v,
+        ],
+    );
+    assert_fires(&input, &law, &expected);
+
+    // Exact-keyset veto: an extra sdpa attr declines the {scale}
+    // fields spec (the _dcgs spelling is a different law).
+    let input = op_attrs(
+        "sdpa",
+        vec![kconst(json!(1)), kconst(json!(2)), kconst(json!(3))],
+        json!({"scale": 0.5, "is_causal": true}),
+    );
+    assert_no_fire(&input, &law);
+}

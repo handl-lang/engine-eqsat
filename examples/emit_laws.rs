@@ -9,6 +9,7 @@
 //! cargo run --example emit_laws -- prior_art > laws/prior_art.json
 //! cargo run --example emit_laws -- categorical > laws/categorical.json
 //! cargo run --example emit_laws -- pointwise_factor > laws/pointwise_factor.json
+//! cargo run --example emit_laws -- attention > laws/attention.json
 //! ```
 //!
 //! Regenerate after changing [`hnl_engine_eqsat::builtin`] or the
@@ -23,6 +24,7 @@ fn main() {
         "simplification" => builtin::simplification(),
         "categorical" => builtin::categorical(),
         "pointwise_factor" => builtin::pointwise_factor(),
+        "attention" => builtin::attention(),
         "prior_art" => builtin::prior_art(),
         "reshape_flatten_demo" => vec![builtin::reshape_flatten_demo()],
         "all" => {
@@ -32,7 +34,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown pack {other:?} — expected simplification|categorical|pointwise_factor|prior_art|reshape_flatten_demo|all"
+                "unknown pack {other:?} — expected simplification|categorical|pointwise_factor|prior_art|attention|reshape_flatten_demo|all"
             );
             std::process::exit(2);
         }
