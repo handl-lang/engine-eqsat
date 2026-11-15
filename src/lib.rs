@@ -121,6 +121,7 @@
 
 pub mod builtin;
 pub mod cost;
+mod dag;
 pub mod engine;
 pub mod guard;
 pub mod law;
@@ -131,7 +132,8 @@ pub mod shape;
 pub use cost::{CostError, CostSpec, OpEntry, OpTable};
 pub use engine::{
     EGraphEngine, Error, OptimizeOptions, OptimizeResult, SaturateOptions, Saturated, SearchEngine,
-    StopPolicy, extract_best, extract_best_spec, optimize, optimize_spec, saturate, size_cost,
+    StopPolicy, extract_best, extract_best_json, extract_best_spec, optimize, optimize_spec,
+    saturate, saturate_json, size_cost,
 };
 pub use guard::{Cond, Dspec, GuardError};
 pub use law::{LAW_FORMAT, Law, LawError, RecordError};

@@ -155,11 +155,52 @@ impl OpTable {
         }
     }
 
+    /// [`OpTable::price_node`] memoised by node *identity* — the same
+    /// value as the plain recursion (the memo caches, the per-edge
+    /// sums still count every occurrence) but linear in distinct
+    /// nodes on a shared DAG where the plain walk is exponential.
+    /// `in_dim` is part of the key: a leaf prices differently in the
+    /// dim slot.
+    fn price_node_dag(
+        &self,
+        t: &Term,
+        in_dim: bool,
+        smemo: &mut Option<crate::shape::Memo>,
+        memo: &mut std::collections::HashMap<(crate::dag::NodeKey, bool), f64>,
+    ) -> f64 {
+        match t {
+            Term::Leaf(_) | Term::Var(_) => self.price_node(t, in_dim, smemo),
+            Term::Op(o) => {
+                let key = (crate::dag::node_key(t), in_dim);
+                if let Some(&c) = memo.get(&key) {
+                    return c;
+                }
+                let mut total = self.head_cost(o, smemo);
+                let sourced = is_op_encoded(o);
+                for (i, child) in o.args.iter().enumerate() {
+                    total += self.price_node_dag(child, sourced && i == 0, smemo, memo);
+                }
+                memo.insert(key, total);
+                total
+            }
+        }
+    }
+
     /// Price the whole term — one postorder pass sharing a shape
     /// memo across every `flops` formula it meets.
     fn price(&self, t: &Term) -> f64 {
         let mut smemo = None;
         self.price_node(t, false, &mut smemo)
+    }
+
+    /// [`OpTable::price`] over a possibly-shared term — identical
+    /// values, linear in distinct nodes. `flops` formulas still draw
+    /// on the structural [`crate::shape::Memo`]; see
+    /// [`CostSpec::needs_shapes`] for the honest boundary.
+    fn price_dag(&self, t: &Term) -> f64 {
+        let mut smemo = None;
+        let mut memo = std::collections::HashMap::default();
+        self.price_node_dag(t, false, &mut smemo, &mut memo)
     }
 
     /// The op head's local cost: flat weights, view zeroing, or a
@@ -185,6 +226,42 @@ impl CostSpec {
             CostSpec::Count => count(t),
             CostSpec::Size => t.size() as f64,
             CostSpec::OpTable(table) => table.price(t),
+        }
+    }
+
+    /// [`CostSpec::price`] over a possibly-shared term — identical
+    /// values, but each walk memoises by node *identity* (pointer-
+    /// equal `Rc` allocations), so a DAG prices in linear time where
+    /// the plain recursion tree-expands exponentially. This is the
+    /// cost function the `dag.program` wire path (`saturate_json` →
+    /// `extract_best_json`) requires; `flops` formulas still evaluate
+    /// through the structural shape memo — see
+    /// [`CostSpec::needs_shapes`].
+    pub fn price_dag(&self, t: &Term) -> f64 {
+        match self {
+            CostSpec::Count => {
+                let mut memo = std::collections::HashMap::default();
+                count_dag(t, &mut memo)
+            }
+            CostSpec::Size => {
+                let mut memo = std::collections::HashMap::default();
+                size_dag(t, &mut memo)
+            }
+            CostSpec::OpTable(table) => table.price_dag(t),
+        }
+    }
+
+    /// Whether this spec's `op_table` carries `flops` formulas —
+    /// the entries whose pricing draws on [`crate::shape`]'s
+    /// *structural* term memo (exponential on a shared DAG). Callers
+    /// saturating `dag.program` inputs should refuse such specs by
+    /// name rather than hang inside shape inference.
+    pub fn needs_shapes(&self) -> bool {
+        match self {
+            CostSpec::OpTable(table) => {
+                table.ops.values().any(|e| matches!(e, OpEntry::Formula(_)))
+            }
+            _ => false,
         }
     }
 
@@ -274,6 +351,39 @@ fn count(t: &Term) -> f64 {
     match t {
         Term::Var(_) | Term::Leaf(_) => 1.0,
         Term::Op(o) => 1.0 + o.args.iter().map(count).sum::<f64>(),
+    }
+}
+
+/// [`count`] memoised by node identity — same occurrence-priced
+/// value, linear in distinct nodes on a shared DAG.
+fn count_dag(t: &Term, memo: &mut std::collections::HashMap<crate::dag::NodeKey, f64>) -> f64 {
+    match t {
+        Term::Var(_) | Term::Leaf(_) => 1.0,
+        Term::Op(o) => {
+            let key = crate::dag::node_key(t);
+            if let Some(&c) = memo.get(&key) {
+                return c;
+            }
+            let total = 1.0 + o.args.iter().map(|c| count_dag(c, memo)).sum::<f64>();
+            memo.insert(key, total);
+            total
+        }
+    }
+}
+
+/// [`Term::size`] memoised by node identity — same value.
+fn size_dag(t: &Term, memo: &mut std::collections::HashMap<crate::dag::NodeKey, f64>) -> f64 {
+    match t {
+        Term::Var(_) | Term::Leaf(_) => 0.0,
+        Term::Op(o) => {
+            let key = crate::dag::node_key(t);
+            if let Some(&c) = memo.get(&key) {
+                return c;
+            }
+            let total = 1.0 + o.args.iter().map(|c| size_dag(c, memo)).sum::<f64>();
+            memo.insert(key, total);
+            total
+        }
     }
 }
 

@@ -20,7 +20,13 @@
 //! ```
 //!
 //! * `terms`/`check_terms` are `hnl_engine::Term` serde JSON
-//!   (externally-tagged `{"Op": …}` / `{"Const": …}` / …).
+//!   (externally-tagged `{"Op": …}` / `{"Const": …}` / …). `terms`
+//!   additionally accepts a top-level
+//!   `{"Opaque": {"__tag__": "dag.program", "nodes": [...], "root": n}}`
+//!   record — the ADR-0173 shared-subtree envelope — which lifts
+//!   node-table-first into e-class ids (see `hnl_engine_eqsat::dag`'s
+//!   decoding rules in `src/dag.rs`); `check_terms` stays
+//!   kernel-`Term`-only.
 //! * `laws` are `LAW_FORMAT = 2` records in the `pat` authoring
 //!   spelling — the same corpus the `handl-kit-eqsat` packs ship.
 //! * `cost` is a `CostSpec` record; `null`/absent defaults to
@@ -79,7 +85,9 @@ impl From<eqsat::Error> for RunError {
     }
 }
 
-/// Decode a JSON array of kernel `Term`s.
+/// Decode a JSON array of kernel `Term`s — `check_terms` only; the
+/// `terms` array goes through [`eqsat::saturate_json`] so `dag.program`
+/// records are accepted there.
 fn terms_of(value: Option<&Value>, field: &str) -> Result<Vec<KernelTerm>, RunError> {
     let Some(v) = value else {
         return Ok(Vec::new());
@@ -164,9 +172,33 @@ fn rule_fires_json(graph: &handl_egraph::EGraph) -> Value {
     json!(counts)
 }
 
+/// Decode the `terms` array as raw wire records — each entry is a
+/// kernel-`Term` tree JSON or a top-level `dag.program` envelope;
+/// `saturate_json` dispatches per record. Also reports whether any
+/// entry was a `dag.program` record (the shape-cost refusal input).
+fn term_records_of(spec: &Value) -> Result<(Vec<Value>, bool), RunError> {
+    let Some(v) = spec.get("terms") else {
+        return Err(RunError::BadSpec("\"terms\" is required".into()));
+    };
+    let arr = v
+        .as_array()
+        .ok_or_else(|| RunError::BadSpec("\"terms\" must be an array".into()))?;
+    let mut saw_dag = false;
+    for t in arr {
+        if t.get("Opaque")
+            .and_then(|p| p.get("__tag__"))
+            .and_then(Value::as_str)
+            == Some("dag.program")
+        {
+            saw_dag = true;
+        }
+    }
+    Ok((arr.clone(), saw_dag))
+}
+
 /// Run the spec; returns the report object.
 fn run(spec: &Value) -> Result<Value, RunError> {
-    let terms = terms_of(spec.get("terms"), "terms")?;
+    let (terms, saw_dag) = term_records_of(spec)?;
     if terms.is_empty() {
         return Err(RunError::BadSpec("\"terms\" must be non-empty".into()));
     }
@@ -176,6 +208,17 @@ fn run(spec: &Value) -> Result<Value, RunError> {
         Some(v) => LawSet::from_data(v).map_err(|e| RunError::BadLaws(e.to_string()))?,
     };
     let cost = cost_of(spec)?;
+    // `flops` formulas price through shape inference's *structural*
+    // term memo — exponential on the shared terms a dag.program input
+    // produces. Refuse by name up front instead of hanging.
+    if saw_dag && cost.needs_shapes() {
+        return Err(RunError::BadCost(
+            "flops cost formulas are unsupported over dag.program inputs \
+             (shape inference is tree-priced) — use count/size/op_table \
+             weights or engine=\"python-egraph\""
+                .into(),
+        ));
+    }
     let opts = options_of(spec);
     let root_idx = spec.get("root").and_then(Value::as_u64).unwrap_or(0) as usize;
     if root_idx >= terms.len() {
@@ -185,17 +228,20 @@ fn run(spec: &Value) -> Result<Value, RunError> {
         )));
     }
 
-    // saturate() takes the law slice — compile refusals (unserializable
-    // records, unsupported guards) surface as named engine errors.
-    let mut sat = eqsat::saturate(&terms, laws.laws(), &opts)?;
+    // saturate_json takes the law slice — compile refusals
+    // (unserializable records, unsupported guards) surface as named
+    // engine errors; dag.program records decode node-table-first.
+    let mut sat = eqsat::saturate_json(&terms, laws.laws(), &opts)?;
     let root = sat.roots[root_idx];
 
-    let (term_json, cost_json) = match eqsat::extract_best_spec(&mut sat.graph, root, &cost) {
-        Some(t) => {
-            let c = cost.price(&from_kernel(&t));
-            (serde_json::to_value(&t).ok(), json!(c))
-        }
-        None => (None, Value::Null),
+    // extract_best_json prices DAG-safely (identity-memoised
+    // CostSpec::price_dag) and serialises tree-or-dag.program by the
+    // expansion bounds — the plain `to_kernel` path tree-expands
+    // shared terms exponentially.
+    let (term_json, cost_json) = match eqsat::extract_best_json(&mut sat.graph, root, &cost) {
+        Ok(Some((t, c))) => (Some(t), json!(c)),
+        Ok(None) => (None, Value::Null),
+        Err(e) => return Err(RunError::Engine(e)),
     };
 
     let checks: Vec<Value> = check_terms

@@ -36,6 +36,11 @@ pub enum Error {
     /// tensor-backend channel. Firing would silently drop the side
     /// condition. Named refusal.
     GuardUnsupported(String),
+    /// A wire term record failed to decode — bad JSON shape, a
+    /// malformed `dag.program` node table, or an `Opaque` tag this
+    /// interpretation does not carry. Raised only by the JSON entry
+    /// points ([`saturate_json`]), never by the kernel-`Term` API.
+    BadTerm(String),
 }
 
 impl std::fmt::Display for Error {
@@ -52,6 +57,7 @@ impl std::fmt::Display for Error {
                 f,
                 "law '{name}' guard names an op outside the stage-1 vocabulary"
             ),
+            Error::BadTerm(e) => write!(f, "bad term: {e}"),
         }
     }
 }
@@ -214,13 +220,63 @@ pub fn saturate(
     for t in terms {
         roots.push(graph.add_term(&from_kernel(t), "input")?);
     }
-    // One `run` per root over the shared graph — the dirty frontier
-    // makes repeat runs incremental.
-    let mut stats = None;
-    for &root in &roots {
-        stats = Some(graph.run(&rules, root, &mut run_options(opts))?);
+    let stats = saturate_roots(&mut graph, &roots, &rules, opts)?;
+    Ok(Saturated {
+        graph,
+        roots,
+        stats,
+    })
+}
+
+/// [`saturate`] over **Term-JSON wire records** (`serde_json::Value`).
+///
+/// Each entry is either an ordinary kernel-`Term` serde record
+/// (tree-position `{"Op": …}` / `{"Const": …}` / … — decoded exactly
+/// like [`saturate`]'s input) or a top-level
+/// `{"Opaque": {"__tag__": "dag.program", …}}` envelope carrying a
+/// shared-subtree **node table** (ADR-0173; decoded node-table-first
+/// by the crate-private `dag` module). The
+/// dag record lifts bottom-up into e-class ids, so a hash-consed DAG
+/// input saturates in linear wire size where the tree spelling would
+/// expand exponentially — this is the entry point the `eqsat-run`
+/// driver uses.
+///
+/// # Errors
+///
+/// [`Error::BadTerm`] on an undecodable record or a malformed
+/// `dag.program` table; otherwise as [`saturate`].
+pub fn saturate_json(
+    terms: &[serde_json::Value],
+    laws: &[Law],
+    opts: &SaturateOptions,
+) -> Result<Saturated, Error> {
+    let rules = compile_rules(laws)?;
+    let mut graph = EGraph::new();
+    let mut roots = Vec::with_capacity(terms.len());
+    for t in terms {
+        roots.push(crate::dag::add_json(&mut graph, t, "input")?);
     }
-    let stats = stats.unwrap_or_else(|| SaturationStats {
+    let stats = saturate_roots(&mut graph, &roots, &rules, opts)?;
+    Ok(Saturated {
+        graph,
+        roots,
+        stats,
+    })
+}
+
+/// The shared saturation tail: one `run` per root over the shared
+/// graph — the dirty frontier makes repeat runs incremental.
+fn saturate_roots(
+    graph: &mut EGraph,
+    roots: &[ClassId],
+    rules: &[handl_egraph::Rewrite],
+    opts: &SaturateOptions,
+) -> Result<SaturationStats, Error> {
+    let mut stats = None;
+    for &root in roots {
+        stats = Some(graph.run(rules, root, &mut run_options(opts))?);
+    }
+    Ok(stats.unwrap_or_else(|| SaturationStats {
         iterations: 0,
         n_enodes: graph.n_enodes(),
         n_classes: graph.n_classes(),
@@ -230,12 +286,7 @@ pub fn saturate(
         budget_suspended: Vec::new(),
         stop: StopReason::FixedPoint,
         improved: None,
-    });
-    Ok(Saturated {
-        graph,
-        roots,
-        stats,
-    })
+    }))
 }
 
 /// Extract the minimum-cost representative of `root`'s e-class and
@@ -352,6 +403,34 @@ pub fn optimize_spec(
 ) -> Result<OptimizeResult, Error> {
     let mut adapted = |t: &ETerm| cost.price(t);
     optimize_inner(term, laws, &mut adapted, opts)
+}
+
+/// [`extract_best_spec`] for the `dag.program` wire path: prices with
+/// [`CostSpec::price_dag`] (identity-memoised — safe on the shared
+/// terms extraction returns) and serialises through the crate's
+/// `dag::term_to_wire`, which emits the plain tree record or
+/// the `dag.program` node table depending on the expansion bounds.
+///
+/// Returns the wire `Value` plus the occurrence-priced cost, or `None`
+/// when the class has no acyclic extractable member.
+///
+/// # Errors
+///
+/// [`Error::BadTerm`] when the extracted term contains a node with no
+/// kernel-`Term` spelling (a metavariable, or an enode attr outside
+/// the `source`/`foreign`/`lit`/`__attrs__` channels).
+pub fn extract_best_json(
+    graph: &mut EGraph,
+    root: ClassId,
+    cost: &CostSpec,
+) -> Result<Option<(serde_json::Value, f64)>, Error> {
+    let mut adapted = |t: &ETerm| cost.price_dag(t);
+    let Some(best) = graph.extract_best(root, &mut adapted, None, None) else {
+        return Ok(None);
+    };
+    let priced = cost.price_dag(&best);
+    let wire = crate::dag::term_to_wire(&best)?;
+    Ok(Some((wire, priced)))
 }
 
 /// [`extract_best`] over a serializable [`CostSpec`] — prices
