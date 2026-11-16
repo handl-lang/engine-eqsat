@@ -1617,22 +1617,14 @@ fn dag_program_input_saturates_without_tree_expansion() {
     // 45 doublings: 2^45 tree occurrences, 47 table nodes. The
     // pre-dag wire could not even spell this record.
     let dag = doubling_dag(45);
-    let mut sat = eqsat::saturate_json(
-        &[dag],
-        &[],
-        &eqsat::SaturateOptions::spec(),
-    )
-    .expect("saturate dag.program input");
+    let mut sat = eqsat::saturate_json(&[dag], &[], &eqsat::SaturateOptions::spec())
+        .expect("saturate dag.program input");
     assert_eq!(sat.roots.len(), 1);
 
     let cost = eqsat::CostSpec::Size;
-    let (wire, priced) = eqsat::extract_best_json(
-        &mut sat.graph,
-        sat.roots[0],
-        &cost,
-    )
-    .expect("extract")
-    .expect("a member");
+    let (wire, priced) = eqsat::extract_best_json(&mut sat.graph, sat.roots[0], &cost)
+        .expect("extract")
+        .expect("a member");
     assert!(priced.is_finite());
     // The extraction's tree expansion is 2^45 — the wire must be the
     // dag.program record, not the tree spelling.
@@ -1641,11 +1633,13 @@ fn dag_program_input_saturates_without_tree_expansion() {
     // Every `add` node references its child by *index* — args are
     // integers, not nested records.
     let last = &nodes[nodes.len() - 1];
-    assert!(last["Op"]["args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|a| a.is_u64()));
+    assert!(
+        last["Op"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a.is_u64())
+    );
 }
 
 #[test]
@@ -1692,11 +1686,143 @@ fn dag_program_small_term_emits_tree_wire() {
         "dim": 0, "name": "add", "args": [2, 2], "source": "Native",
     }}));
     let dag = json!({"Opaque": {"__tag__": "dag.program", "nodes": nodes, "root": root}});
-    let mut sat = eqsat::saturate_json(&[dag], &[], &eqsat::SaturateOptions::spec())
-        .expect("saturate");
+    let mut sat =
+        eqsat::saturate_json(&[dag], &[], &eqsat::SaturateOptions::spec()).expect("saturate");
     let cost = eqsat::CostSpec::Size;
     let (wire, _) = eqsat::extract_best_json(&mut sat.graph, sat.roots[0], &cost)
         .expect("extract")
         .expect("a member");
-    assert!(wire.get("Op").is_some(), "small terms emit the tree record: {wire}");
+    assert!(
+        wire.get("Op").is_some(),
+        "small terms emit the tree record: {wire}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+//  dag.program wire — Arr leaf records (`{"Arr": {dim, value}}`)
+// ---------------------------------------------------------------------------
+
+/// An `Arr` leaf record in the spelling hnl_codec emits: `dim` is a
+/// nested kernel-`Term` record (leaf records carry no table indices)
+/// and `value` is the `__mlopt_leaf__` payload.
+fn arr_leaf_record(kind: &str, name: &str, shape: serde_json::Value) -> serde_json::Value {
+    json!({"Arr": {
+        "dim": {"Const": {"value": 1}},
+        "value": {"__mlopt_leaf__": kind, "name": name, "shape": shape},
+    }})
+}
+
+#[test]
+fn dag_program_arr_leaves_round_trip_tree_wire() {
+    // `add(var_x, param_w)` over two Arr leaf records — the hnl_codec
+    // leaf spelling. Small term: extraction emits the tree record,
+    // and the `arr` enodes must come back as `{"Arr": …}` records,
+    // not die on the unknown `"value"` attr.
+    let dag = json!({"Opaque": {"__tag__": "dag.program", "nodes": [
+        json!({"Const": {"value": 1}}),                                  // 0: dim
+        arr_leaf_record("var", "x", json!([2, 3])),                      // 1
+        arr_leaf_record("param", "w", json!(null)),                    // 2
+        json!({"Op": {"dim": 0, "name": "add", "args": [1, 2],
+                      "source": "Native"}}),                             // 3
+    ], "root": 3}});
+    let mut sat = eqsat::saturate_json(&[dag], &[], &eqsat::SaturateOptions::spec())
+        .expect("saturate dag.program with Arr leaves");
+    let cost = eqsat::CostSpec::Size;
+    let (wire, _) = eqsat::extract_best_json(&mut sat.graph, sat.roots[0], &cost)
+        .expect("extract")
+        .expect("a member");
+    let args = wire["Op"]["args"].as_array().expect("op args");
+    assert_eq!(args.len(), 2, "wire: {wire}");
+    assert_eq!(args[0]["Arr"]["value"]["name"], "x");
+    assert_eq!(args[0]["Arr"]["value"]["__mlopt_leaf__"], "var");
+    assert_eq!(args[0]["Arr"]["dim"], json!({"Const": {"value": 1}}));
+    assert_eq!(args[1]["Arr"]["value"]["name"], "w");
+
+    // The emitted wire must itself be valid input — full round-trip.
+    let mut sat2 = eqsat::saturate_json(
+        std::slice::from_ref(&wire),
+        &[],
+        &eqsat::SaturateOptions::spec(),
+    )
+    .expect("re-saturate emitted wire");
+    let (wire2, _) = eqsat::extract_best_json(&mut sat2.graph, sat2.roots[0], &cost)
+        .expect("re-extract")
+        .expect("a member");
+    assert_eq!(wire, wire2, "Arr-leaf round-trip drifted");
+}
+
+#[test]
+fn dag_program_arr_leaf_survives_dag_output() {
+    // Same exponential-sharing shape as `doubling_dag`, but the shared
+    // base leaf is an `Arr` record: extraction must emit the dag table
+    // spelling where the `Arr` node's `dim` is an inline tree record
+    // (leaf records carry no table indices), and the whole record must
+    // re-saturate.
+    let mut nodes = vec![
+        json!({"Const": {"value": 1}}),          // 0: dim
+        arr_leaf_record("var", "x", json!([4])), // 1: shared Arr leaf
+    ];
+    for _ in 0..20 {
+        let prev = nodes.len() - 1;
+        nodes.push(json!({"Op": {
+            "dim": 0, "name": "add", "args": [prev, prev],
+            "source": "Native",
+        }}));
+    }
+    let root = nodes.len() - 1;
+    let dag = json!({"Opaque": {"__tag__": "dag.program", "nodes": nodes, "root": root}});
+    let mut sat =
+        eqsat::saturate_json(&[dag], &[], &eqsat::SaturateOptions::spec()).expect("saturate");
+    let cost = eqsat::CostSpec::Size;
+    let (wire, _) = eqsat::extract_best_json(&mut sat.graph, sat.roots[0], &cost)
+        .expect("extract")
+        .expect("a member");
+    assert_eq!(wire["Opaque"]["__tag__"], "dag.program");
+    let nodes = wire["Opaque"]["nodes"].as_array().expect("nodes");
+    let arr = nodes
+        .iter()
+        .find(|n| n.get("Arr").is_some())
+        .expect("an Arr leaf record in the dag table");
+    // `dim` is a nested record, never a node-table index.
+    assert_eq!(arr["Arr"]["dim"], json!({"Const": {"value": 1}}));
+    assert_eq!(arr["Arr"]["value"]["name"], "x");
+
+    // The dag table re-saturates — the Arr record decodes as a leaf.
+    eqsat::saturate_json(&[wire], &[], &eqsat::SaturateOptions::spec())
+        .expect("re-saturate dag wire with Arr leaf");
+}
+
+#[test]
+fn dag_output_noncanonical_arr_enode_refuses_by_name() {
+    // A user op literally named "arr" with zero args lifts to a
+    // one-child "arr" enode carrying `source` — *not* the canonical
+    // `Term::Arr` spelling (which has exactly the `value` attr). The
+    // extractor must refuse loudly rather than mis-emit.
+    let term = json!({"Op": {
+        "dim": {"Const": {"value": 1}},
+        "name": "arr",
+        "args": [],
+        "source": "Native",
+    }});
+    let mut sat =
+        eqsat::saturate_json(&[term], &[], &eqsat::SaturateOptions::spec()).expect("saturate");
+    let err = eqsat::extract_best_json(&mut sat.graph, sat.roots[0], &eqsat::CostSpec::Size)
+        .expect_err("non-canonical 'arr' enode must refuse");
+    assert!(matches!(err, eqsat::Error::BadTerm(_)), "{err}");
+    assert!(err.to_string().contains("'arr' enode"), "{err}");
+
+    // …but a multi-child "arr" op is an ordinary op and still emits.
+    let term = json!({"Op": {
+        "dim": {"Const": {"value": 1}},
+        "name": "arr",
+        "args": [{"Const": {"value": 5}}],
+        "source": "Native",
+    }});
+    let mut sat =
+        eqsat::saturate_json(&[term], &[], &eqsat::SaturateOptions::spec()).expect("saturate");
+    let (wire, _) = eqsat::extract_best_json(&mut sat.graph, sat.roots[0], &eqsat::CostSpec::Size)
+        .expect("extract")
+        .expect("a member");
+    assert_eq!(wire["Op"]["name"], "arr", "wire: {wire}");
+    assert_eq!(wire["Op"]["args"], json!([{"Const": {"value": 5}}]));
 }

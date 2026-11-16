@@ -29,8 +29,9 @@
 //!   "source": <ArrSource>, "lit"?: <value>, "attrs"?: <object>}}`
 //!   — `dim`/`args` are node-table indices, everything else the
 //!   kernel `Term::Op` serde fields;
-//! * `{"Const": {"value": <value>}}` — a leaf, decoded as a kernel
-//!   `Term` (the `__mlopt_leaf__:` prefix leaves included).
+//! * `{"Const": {"value": <value>}}` / `{"Arr": {"dim": <term>,
+//!   "value": <value>}}` — leaves, decoded as kernel `Term`s (the
+//!   `__mlopt_leaf__:`-style payload leaves included).
 //!
 //! Anything else — a nested `Opaque`, an unknown node tag, a non-index
 //! `args` entry, an out-of-range index — is a named refusal, never a
@@ -449,6 +450,46 @@ fn op_record(o: &handl_egraph::Op, kids: &[Value]) -> Result<Value, Error> {
     Ok(serde_json::json!({"Op": node}))
 }
 
+/// The `Term::Arr` leaf inverse of `from_kernel`'s `"arr"` arm
+/// (`handl_egraph::term_bridge`): an `"arr"` enode with exactly one
+/// child (the dim slot) and exactly one attr — `("value", Lit)` — is
+/// the e-graph spelling of `{"Arr": {"dim": …, "value": …}}`. `dim`
+/// is emitted as a *tree* record, not a table index: leaf records
+/// carry no node-table references (the `add_node` decode runs them
+/// through the plain kernel-`Term` path), matching the
+/// `__mlopt_leaf__` records hnl_codec emits.
+///
+/// Only the canonical spelling decodes: an `"arr"` enode with one
+/// child but any other attr set is a named refusal — `to_kernel`'s
+/// forward arm reads *any* one-child `"arr"` enode as `Term::Arr`
+/// (defaulting/dropping attrs), so an `Op` record would misreport
+/// what the term actually is. `"arr"` enodes with ≠1 child are
+/// ordinary ops and fall through to [`op_record`].
+fn arr_leaf_record(o: &handl_egraph::Op) -> Result<Option<Value>, Error> {
+    if &*o.op != "arr" || o.args.len() != 1 {
+        return Ok(None);
+    }
+    let bad = |m: &str| {
+        Error::BadTerm(format!(
+            "dag output: 'arr' enode {m} — not the canonical Term::Arr spelling"
+        ))
+    };
+    if o.attrs.len() != 1 {
+        return Err(bad("must carry exactly the 'value' attr"));
+    }
+    let (k, v) = &o.attrs[0];
+    if k.as_ref() != "value" {
+        return Err(bad("attr must be 'value'"));
+    }
+    let handl_egraph::TermAttr::Lit(av) = v else {
+        return Err(bad("'value' attr is a pattern metavariable"));
+    };
+    let dim = tree_json(&o.args[0])?;
+    Ok(Some(serde_json::json!({
+        "Arr": {"dim": dim, "value": av.to_json()}
+    })))
+}
+
 /// Leaf record: the e-graph leaf key IS a serialized kernel `Term` —
 /// parse it back into the record it names (`{"Const": …}` etc.).
 fn leaf_record(key: &str) -> Result<Value, Error> {
@@ -495,6 +536,9 @@ fn node_record(node: &ETerm, index: &HashMap<NodeKey, usize>) -> Result<Value, E
             "dag output: metavariable {name:?} reached extraction"
         ))),
         ETerm::Op(o) => {
+            if let Some(rec) = arr_leaf_record(o)? {
+                return Ok(rec);
+            }
             // children[0] = dim, rest = args — indices into the table.
             let kids: Vec<Value> = o
                 .args
@@ -515,6 +559,9 @@ fn tree_json(t: &ETerm) -> Result<Value, Error> {
             "dag output: metavariable {name:?} reached extraction"
         ))),
         ETerm::Op(o) => {
+            if let Some(rec) = arr_leaf_record(o)? {
+                return Ok(rec);
+            }
             let kids: Vec<Value> = o.args.iter().map(tree_json).collect::<Result<_, _>>()?;
             op_record(o, &kids)
         }
