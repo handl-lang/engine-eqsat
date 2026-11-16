@@ -1792,6 +1792,87 @@ fn dag_program_arr_leaf_survives_dag_output() {
         .expect("re-saturate dag wire with Arr leaf");
 }
 
+/// A `__mlopt_leaf__` payload riding the canonical `Arr` kernel
+/// record — the `leaf="arr"` wire spelling of the same `Var`/`Param`
+/// leaf [`bridge_leaf`] encodes as a `Const` string. Decode accepts
+/// both spellings permanently, so every leaf-shaped read (declared
+/// shape, `leaf-dim`, leaf pricing) must treat them identically.
+fn arr_bridge_leaf(name: &str, shape: serde_json::Value) -> KTerm {
+    KTerm::Arr {
+        dim: Box::new(kconst(json!(1))),
+        value: json!({"__mlopt_leaf__": "var", "name": name, "shape": shape}),
+    }
+}
+
+#[test]
+fn arr_leaf_spelling_preserves_shape_guard_parity() {
+    // The WP4 `mul_unsq_nat` veto, under BOTH leaf spellings: `a`/`b`
+    // declare `[4,6]`, both `unsqueeze(-1)` operands lift to
+    // `[4,6,1]`, and stripping either pad cannot broadcast. If the
+    // `arr` enode's declared shape went unread the guards would see
+    // phantom scalars and FIRE — the kit-torch v0.1.13 repin
+    // regression was exactly this class of miss (saturation
+    // collapsed 3429 → 472 enodes).
+    let lifted = |t: &KTerm| op_attrs("unsqueeze", vec![t.clone()], json!({"dim": -1}));
+    let inputs = [
+        native_op(
+            "mul",
+            vec![
+                lifted(&bridge_leaf("a", json!([4, 6]))),
+                lifted(&bridge_leaf("b", json!([4, 6]))),
+            ],
+        ),
+        native_op(
+            "mul",
+            vec![
+                lifted(&arr_bridge_leaf("a", json!([4, 6]))),
+                lifted(&arr_bridge_leaf("b", json!([4, 6]))),
+            ],
+        ),
+    ];
+    for input in &inputs {
+        assert_no_fire(input, &builtin::mul_unsq_pad_l());
+        assert_no_fire(input, &builtin::mul_unsq_pad_r());
+    }
+}
+
+#[test]
+fn arr_leaf_enode_prices_as_the_leaf_it_encodes() {
+    // Extraction economics may not depend on the leaf wire spelling:
+    // the canonical `arr` enode prices exactly like the `Term::Leaf`
+    // the `const-str` profile produced — flat leaf weight, dim child
+    // unbilled — under every CostSpec kind.
+    let specs = [
+        eqsat::CostSpec::Size,
+        eqsat::CostSpec::Count,
+        eqsat::CostSpec::from_data(&json!({
+            "kind": "op_table", "default": 1.0, "leaf": 0.25,
+            "dim_leaf": 0.0, "ops": {},
+        }))
+        .expect("op_table spec"),
+    ];
+    let wrap = |l: &KTerm| native_op("add", vec![l.clone(), l.clone()]);
+    for spec in &specs {
+        for (mk_arr, mk_cs) in [
+            (
+                arr_bridge_leaf("w", json!([2, 3])),
+                bridge_leaf("w", json!([2, 3])),
+            ),
+            (
+                wrap(&arr_bridge_leaf("w", json!([2, 3]))),
+                wrap(&bridge_leaf("w", json!([2, 3]))),
+            ),
+        ] {
+            let (a, c) = (from_kernel(&mk_arr), from_kernel(&mk_cs));
+            assert_eq!(
+                spec.price(&a),
+                spec.price(&c),
+                "{spec:?}: arr-spelled leaf priced differently"
+            );
+        }
+    }
+}
+
 #[test]
 fn dag_output_noncanonical_arr_enode_refuses_by_name() {
     // A user op literally named "arr" with zero args lifts to a

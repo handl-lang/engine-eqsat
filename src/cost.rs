@@ -134,6 +134,16 @@ impl OpTable {
     /// by [`OpTable::price`]).
     fn price_node(&self, t: &Term, in_dim: bool, smemo: &mut Option<crate::shape::Memo>) -> f64 {
         match t {
+            // The canonical `arr` enode spelling of an mlopt bridge
+            // leaf prices exactly like the `Term::Leaf` it encodes —
+            // the two leaf profiles must canonicalise identically.
+            Term::Op(o) if crate::shape::is_bridge_leaf_enode(o) => {
+                if in_dim {
+                    self.dim_leaf.unwrap_or(self.leaf)
+                } else {
+                    self.leaf
+                }
+            }
             Term::Leaf(_) => {
                 if in_dim {
                     self.dim_leaf.unwrap_or(self.leaf)
@@ -170,6 +180,11 @@ impl OpTable {
     ) -> f64 {
         match t {
             Term::Leaf(_) | Term::Var(_) => self.price_node(t, in_dim, smemo),
+            // Bridge-leaf `arr` enodes price flat like leaves — no
+            // dim-child recursion (see `price_node`).
+            Term::Op(o) if crate::shape::is_bridge_leaf_enode(o) => {
+                self.price_node(t, in_dim, smemo)
+            }
             Term::Op(o) => {
                 let key = (crate::dag::node_key(t), in_dim);
                 if let Some(&c) = memo.get(&key) {
@@ -224,7 +239,7 @@ impl CostSpec {
     pub fn price(&self, t: &Term) -> f64 {
         match self {
             CostSpec::Count => count(t),
-            CostSpec::Size => t.size() as f64,
+            CostSpec::Size => size_term(t),
             CostSpec::OpTable(table) => table.price(t),
         }
     }
@@ -346,10 +361,13 @@ fn num(v: f64) -> Value {
 }
 
 /// The node-count cost: every node (leaf, var, op) costs 1 plus its
-/// children — the plain "how many nodes" metric.
+/// children — the plain "how many nodes" metric. A canonical `arr`
+/// enode spelling an mlopt bridge leaf counts as the one leaf it
+/// encodes (its dim child is not a separate node).
 fn count(t: &Term) -> f64 {
     match t {
         Term::Var(_) | Term::Leaf(_) => 1.0,
+        Term::Op(o) if crate::shape::is_bridge_leaf_enode(o) => 1.0,
         Term::Op(o) => 1.0 + o.args.iter().map(count).sum::<f64>(),
     }
 }
@@ -359,6 +377,7 @@ fn count(t: &Term) -> f64 {
 fn count_dag(t: &Term, memo: &mut std::collections::HashMap<crate::dag::NodeKey, f64>) -> f64 {
     match t {
         Term::Var(_) | Term::Leaf(_) => 1.0,
+        Term::Op(o) if crate::shape::is_bridge_leaf_enode(o) => 1.0,
         Term::Op(o) => {
             let key = crate::dag::node_key(t);
             if let Some(&c) = memo.get(&key) {
@@ -371,10 +390,24 @@ fn count_dag(t: &Term, memo: &mut std::collections::HashMap<crate::dag::NodeKey,
     }
 }
 
-/// [`Term::size`] memoised by node identity — same value.
+/// [`Term::size`] with the bridge-leaf `arr` enode priced as the
+/// leaf it encodes — the tree-path twin of [`size_dag`] for
+/// [`CostSpec::Size`].
+fn size_term(t: &Term) -> f64 {
+    match t {
+        Term::Var(_) | Term::Leaf(_) => 0.0,
+        Term::Op(o) if crate::shape::is_bridge_leaf_enode(o) => 0.0,
+        Term::Op(o) => 1.0 + o.args.iter().map(size_term).sum::<f64>(),
+    }
+}
+
+/// [`Term::size`] memoised by node identity — same value, except a
+/// canonical `arr` enode spelling an mlopt bridge leaf prices 0 like
+/// the `Term::Leaf` it encodes (the `const-str` leaf profile's cost).
 fn size_dag(t: &Term, memo: &mut std::collections::HashMap<crate::dag::NodeKey, f64>) -> f64 {
     match t {
         Term::Var(_) | Term::Leaf(_) => 0.0,
+        Term::Op(o) if crate::shape::is_bridge_leaf_enode(o) => 0.0,
         Term::Op(o) => {
             let key = crate::dag::node_key(t);
             if let Some(&c) = memo.get(&key) {

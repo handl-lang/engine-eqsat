@@ -284,6 +284,37 @@ fn node_children(t: &Term) -> &[Term] {
     }
 }
 
+/// The canonical `Term::Arr` e-graph spelling — an `arr` enode with
+/// exactly one child (the dim slot) and exactly one `Lit` attr named
+/// `value`, the inverse of `dag.rs`'s `arr_leaf_record`. Returns the
+/// `value` payload as JSON when the enode has that shape; `None` for
+/// any other `arr` enode (a different arity/attr set is *not* the
+/// `Term::Arr` spelling and falls through to ordinary op handling).
+fn arr_leaf_value(o: &Op) -> Option<Value> {
+    if &*o.op != "arr" || o.args.len() != 1 || o.attrs.len() != 1 {
+        return None;
+    }
+    let (k, v) = &o.attrs[0];
+    if k.as_ref() != "value" {
+        return None;
+    }
+    match v {
+        TermAttr::Lit(av) => Some(av.to_json()),
+        TermAttr::Meta(_) => None,
+    }
+}
+
+/// Whether `o` is the canonical `arr` enode spelling of an mlopt
+/// bridge leaf — a `{"__mlopt_leaf__": …}` record inside `Arr.value`.
+/// These enodes *are* `Var`/`Param` leaves wearing the canonical
+/// `Arr` wire spelling (the `leaf="arr"` profile); every leaf-shaped
+/// read — declared shape, `leaf-dim`, leaf pricing — must see them
+/// exactly as it saw the `Term::Leaf` `const-str` spelling, or the
+/// two leaf profiles stop canonicalising identically.
+pub(crate) fn is_bridge_leaf_enode(o: &Op) -> bool {
+    arr_leaf_value(o).is_some_and(|v| v.get("__mlopt_leaf__").is_some())
+}
+
 /// Compute one node's [`TensorInfo`]; every operand is already
 /// memoised by the postorder driver.
 fn infer_node(t: &Term, memo: &Memo) -> TensorInfo {
@@ -295,7 +326,14 @@ fn infer_node(t: &Term, memo: &Memo) -> TensorInfo {
             dtype: None,
         },
         Term::Leaf(key) => leaf_info(key),
-        Term::Op(o) => infer_op(o, memo),
+        Term::Op(o) => match arr_leaf_value(o) {
+            // The canonical `arr` leaf spelling carries its declared
+            // shape inside `Arr.value` — read it through the same
+            // leaf channels a `Term::Leaf` key decodes through, so
+            // `arr` and `const-str` leaves infer identically.
+            Some(v) => json_leaf_info(&v),
+            None => infer_op(o, memo),
+        },
     }
 }
 
@@ -2302,16 +2340,20 @@ fn tensor_wire_info(v: &Value) -> Option<TensorInfo> {
 
 /// The leaf's *declared* shape as concrete dims — the
 /// `("leaf-dim", T, i)` dspec read (`term.typ.shape` in `cond.py`):
-/// only a [`Term::Leaf`] whose payload declares a non-empty,
-/// all-int shape answers; `Op` bindings, shape-less leaves and
-/// `None`-dim declarations all decline. This is the *declared* read —
-/// never the inferred op shape — matching `_d_leaf_dim`'s strictness
-/// (an `Op` has no `.typ` and declines there too).
+/// only a [`Term::Leaf`] — or the canonical `arr` enode spelling of
+/// one — whose payload declares a non-empty, all-int shape answers;
+/// `Op` bindings, shape-less leaves and `None`-dim declarations all
+/// decline. This is the *declared* read — never the inferred op
+/// shape — matching `_d_leaf_dim`'s strictness (a domain `Op` has no
+/// `.typ` and declines there too; the `arr` enode is not a domain
+/// op, it is the leaf's canonical spelling).
 pub(crate) fn leaf_declared_dims(t: &Term) -> Option<Vec<i64>> {
-    let Term::Leaf(key) = t else {
-        return None;
+    let shape = match t {
+        Term::Leaf(key) => leaf_info(key).shape,
+        Term::Op(o) => json_leaf_info(&arr_leaf_value(o)?).shape,
+        Term::Var(_) => return None,
     };
-    match leaf_info(key).shape {
+    match shape {
         Shape::Tuple(dims) => dims
             .into_iter()
             .collect::<Option<Vec<i64>>>()
