@@ -49,8 +49,13 @@
 //!   rule shapes), opt-in like the Python collection.
 //! * [`prior_art`] — the portable slice of `PRIOR_ART_RULES`: the
 //!   const-algebra folds (`pow_*`, `*_const_*`, `neg_const`, the
-//!   `*_const_assoc_*` families) and the sigmoid/tanh/hardsigmoid
-//!   folds whose guards are `const-cmp` conjunctions.
+//!   `*_const_assoc_*` families), the sigmoid/tanh/hardsigmoid
+//!   folds whose guards are `const-cmp` conjunctions, the §2
+//!   pointwise idempotence/parity family, the const-free scalar
+//!   folds (`recip_recip`, `add/sub/neg` refolds, `id_sub`/`id_div`,
+//!   `add_self`/`mul2_to_add`, `mul_neg1`), and the spelled-unit
+//!   `*_zeroslike_r`/`*_oneslike_r` folds whose `shaped`/`shape-eq`/
+//!   `bcast` grid guard is declarative data.
 //!   Deliberately NOT in [`all`], mirroring the Python bank's
 //!   opt-in `prior_art` preset.
 //! * [`pointwise_factor`] — `POINTWISE_FACTOR_RULES`, the opt-in
@@ -1394,6 +1399,489 @@ pub fn mul_const_div() -> Law {
     .with_dspec(json!({"$leaf:C3": ["fdiv", ["const", "C2"], ["const", "C1"]]}))
     .with_tag("prior_art")
     .with_tag("simplification")
+}
+
+// ---------------------------------------------------------------------------
+//  prior_art §2 tail — pointwise idempotence/parity, the scalar/Const
+//  remainder, and the spelled-unit folds.  Every member is unguarded or
+//  rides the ported `shaped`/`shape-eq`/`bcast` vocabulary verbatim.
+// ---------------------------------------------------------------------------
+
+/// `abs_idem`: `abs(abs(u)) → abs(u)`.
+///
+/// Python: `priorart.py` `ABS_IDEM`, tags `prior_art`+`simplification`.
+pub fn abs_idem() -> Law {
+    Law::new(
+        "abs_idem",
+        Pat::op("abs", vec![Pat::op("abs", vec![Pat::var("u")])]),
+        Pat::op("abs", vec![Pat::var("u")]),
+    )
+    .with_law("abs(abs(u)) = abs(u).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `abs_square`: `abs(square(u)) → square(u)` — the square is already
+/// nonneg.
+///
+/// Python: `priorart.py` `ABS_SQUARE`, tags `prior_art`+`simplification`.
+pub fn abs_square() -> Law {
+    Law::new(
+        "abs_square",
+        Pat::op("abs", vec![Pat::op("square", vec![Pat::var("u")])]),
+        Pat::op("square", vec![Pat::var("u")]),
+    )
+    .with_law("|u²| = u² — the square is already nonneg.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `square_abs`: `square(abs(u)) → square(u)` — abs is invisible to
+/// the square.
+///
+/// Python: `priorart.py` `SQUARE_ABS`, tags `prior_art`+`simplification`.
+pub fn square_abs() -> Law {
+    Law::new(
+        "square_abs",
+        Pat::op("square", vec![Pat::op("abs", vec![Pat::var("u")])]),
+        Pat::op("square", vec![Pat::var("u")]),
+    )
+    .with_law("(|u|)² = u² — abs is invisible to the square.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `abs_neg`: `abs(neg(u)) → abs(u)`.
+///
+/// Python: `priorart.py` `ABS_NEG`, tags `prior_art`+`simplification`.
+pub fn abs_neg() -> Law {
+    Law::new(
+        "abs_neg",
+        Pat::op("abs", vec![Pat::op("neg", vec![Pat::var("u")])]),
+        Pat::op("abs", vec![Pat::var("u")]),
+    )
+    .with_law("|−u| = |u|.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `sqrt_square`: `sqrt(square(u)) → abs(u)` — the canonical spelling
+/// (NOT `u` — the negative branch keeps the abs).
+///
+/// Python: `priorart.py` `SQRT_SQUARE`, tags `prior_art`+`simplification`.
+pub fn sqrt_square() -> Law {
+    Law::new(
+        "sqrt_square",
+        Pat::op("sqrt", vec![Pat::op("square", vec![Pat::var("u")])]),
+        Pat::op("abs", vec![Pat::var("u")]),
+    )
+    .with_law("√(u²) = |u| — the canonical spelling (NOT u — the negative branch keeps the abs).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `rsqrt_square`: `rsqrt(square(u)) → reciprocal(abs(u))` — the
+/// rsqrt twin.
+///
+/// Python: `priorart.py` `RSQRT_SQUARE`, tags `prior_art`+`simplification`.
+pub fn rsqrt_square() -> Law {
+    Law::new(
+        "rsqrt_square",
+        Pat::op("rsqrt", vec![Pat::op("square", vec![Pat::var("u")])]),
+        Pat::op("reciprocal", vec![Pat::op("abs", vec![Pat::var("u")])]),
+    )
+    .with_law("1/√(u²) = 1/|u| — the rsqrt twin.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `maximum_idem`: `maximum(u, u) → u`.
+///
+/// Python: `priorart.py` `MAXIMUM_IDEM`, tags `prior_art`+`simplification`.
+pub fn maximum_idem() -> Law {
+    Law::new(
+        "maximum_idem",
+        Pat::op("maximum", vec![Pat::var("u"), Pat::var("u")]),
+        Pat::var("u"),
+    )
+    .with_law("max(u, u) = u.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `minimum_idem`: `minimum(u, u) → u`.
+///
+/// Python: `priorart.py` `MINIMUM_IDEM`, tags `prior_art`+`simplification`.
+pub fn minimum_idem() -> Law {
+    Law::new(
+        "minimum_idem",
+        Pat::op("minimum", vec![Pat::var("u"), Pat::var("u")]),
+        Pat::var("u"),
+    )
+    .with_law("min(u, u) = u.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `tanh_neg`: `tanh(neg(u)) → neg(tanh(u))` — tanh is odd.
+///
+/// Python: `priorart.py` `TANH_NEG`, tags `prior_art`+`simplification`.
+pub fn tanh_neg() -> Law {
+    Law::new(
+        "tanh_neg",
+        Pat::op("tanh", vec![Pat::op("neg", vec![Pat::var("u")])]),
+        Pat::op("neg", vec![Pat::op("tanh", vec![Pat::var("u")])]),
+    )
+    .with_law("tanh is odd: tanh(−u) = −tanh(u).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `sigmoid_neg`: `sigmoid(neg(u)) → sub(1, sigmoid(u))` — the
+/// symmetric complement.
+///
+/// Python: `priorart.py` `SIGMOID_NEG`, tags `prior_art`+`simplification`.
+pub fn sigmoid_neg() -> Law {
+    Law::new(
+        "sigmoid_neg",
+        Pat::op("sigmoid", vec![Pat::op("neg", vec![Pat::var("u")])]),
+        Pat::op(
+            "sub",
+            vec![
+                Pat::constant(json!(1)),
+                Pat::op("sigmoid", vec![Pat::var("u")]),
+            ],
+        ),
+    )
+    .with_law("σ(−u) = 1 − σ(u) — the symmetric complement.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `softsign_neg`: `softsign(neg(u)) → neg(softsign(u))` — odd.
+///
+/// Python: `priorart.py` `SOFTSIGN_NEG`, tags `prior_art`+`simplification`.
+pub fn softsign_neg() -> Law {
+    Law::new(
+        "softsign_neg",
+        Pat::op("softsign", vec![Pat::op("neg", vec![Pat::var("u")])]),
+        Pat::op("neg", vec![Pat::op("softsign", vec![Pat::var("u")])]),
+    )
+    .with_law("softsign is odd.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `erf_neg`: `erf(neg(u)) → neg(erf(u))` — erf is odd.
+///
+/// Python: `priorart.py` `ERF_NEG`, tags `prior_art`+`simplification`.
+pub fn erf_neg() -> Law {
+    Law::new(
+        "erf_neg",
+        Pat::op("erf", vec![Pat::op("neg", vec![Pat::var("u")])]),
+        Pat::op("neg", vec![Pat::op("erf", vec![Pat::var("u")])]),
+    )
+    .with_law("erf is odd.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `sin_neg`: `sin(neg(u)) → neg(sin(u))` — sin is odd.
+///
+/// Python: `priorart.py` `SIN_NEG`, tags `prior_art`+`simplification`.
+pub fn sin_neg() -> Law {
+    Law::new(
+        "sin_neg",
+        Pat::op("sin", vec![Pat::op("neg", vec![Pat::var("u")])]),
+        Pat::op("neg", vec![Pat::op("sin", vec![Pat::var("u")])]),
+    )
+    .with_law("sin is odd.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `cos_neg`: `cos(neg(u)) → cos(u)` — cos is even.
+///
+/// Python: `priorart.py` `COS_NEG`, tags `prior_art`+`simplification`.
+pub fn cos_neg() -> Law {
+    Law::new(
+        "cos_neg",
+        Pat::op("cos", vec![Pat::op("neg", vec![Pat::var("u")])]),
+        Pat::op("cos", vec![Pat::var("u")]),
+    )
+    .with_law("cos is even: cos(−u) = cos(u).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `exp_neg_recip`: `exp(neg(u)) → reciprocal(exp(u))`.
+///
+/// Python: `priorart.py` `EXP_NEG_RECIP`, tags
+/// `prior_art`+`simplification`.
+pub fn exp_neg_recip() -> Law {
+    Law::new(
+        "exp_neg_recip",
+        Pat::op("exp", vec![Pat::op("neg", vec![Pat::var("u")])]),
+        Pat::op("reciprocal", vec![Pat::op("exp", vec![Pat::var("u")])]),
+    )
+    .with_law("e⁻ᵘ = 1/eᵘ.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `log_exp`: `log(exp(u)) → u` — eᵘ > 0 always, so the inverse is
+/// total.
+///
+/// Python: `priorart.py` `LOG_EXP`, tags `prior_art`+`simplification`.
+pub fn log_exp() -> Law {
+    Law::new(
+        "log_exp",
+        Pat::op("log", vec![Pat::op("exp", vec![Pat::var("u")])]),
+        Pat::var("u"),
+    )
+    .with_law("log(eᵘ) = u — eᵘ > 0 always, so the inverse is total.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `log_recip`: `log(reciprocal(u)) → neg(log(u))`.
+///
+/// Python: `priorart.py` `LOG_RECIP`, tags `prior_art`+`simplification`.
+pub fn log_recip() -> Law {
+    Law::new(
+        "log_recip",
+        Pat::op("log", vec![Pat::op("reciprocal", vec![Pat::var("u")])]),
+        Pat::op("neg", vec![Pat::op("log", vec![Pat::var("u")])]),
+    )
+    .with_law("log(1/u) = −log(u).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `recip_recip`: `reciprocal(reciprocal(u)) → u` — reciprocal
+/// involution.
+///
+/// Python: `priorart.py` `RECIP_RECIP`, tags
+/// `prior_art`+`simplification`.
+pub fn recip_recip() -> Law {
+    Law::new(
+        "recip_recip",
+        Pat::op(
+            "reciprocal",
+            vec![Pat::op("reciprocal", vec![Pat::var("u")])],
+        ),
+        Pat::var("u"),
+    )
+    .with_law("1/(1/u) = u — reciprocal involution.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `add_neg_to_sub`: `add(a, neg(b)) → sub(a, b)` — the refold
+/// (`sub_to_add`'s inverse).
+///
+/// Python: `priorart.py` `ADD_NEG_TO_SUB`, tags
+/// `prior_art`+`simplification`.
+pub fn add_neg_to_sub() -> Law {
+    Law::new(
+        "add_neg_to_sub",
+        Pat::op(
+            "add",
+            vec![Pat::var("a"), Pat::op("neg", vec![Pat::var("b")])],
+        ),
+        Pat::op("sub", vec![Pat::var("a"), Pat::var("b")]),
+    )
+    .with_law("a + (−b) = a − b — the refold (sub_to_add's inverse).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `sub_neg_to_add`: `sub(a, neg(b)) → add(a, b)`.
+///
+/// Python: `priorart.py` `SUB_NEG_TO_ADD`, tags
+/// `prior_art`+`simplification`.
+pub fn sub_neg_to_add() -> Law {
+    Law::new(
+        "sub_neg_to_add",
+        Pat::op(
+            "sub",
+            vec![Pat::var("a"), Pat::op("neg", vec![Pat::var("b")])],
+        ),
+        Pat::op("add", vec![Pat::var("a"), Pat::var("b")]),
+    )
+    .with_law("a − (−b) = a + b.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `neg_sub`: `neg(sub(a, b)) → sub(b, a)`.
+///
+/// Python: `priorart.py` `NEG_SUB`, tags `prior_art`+`simplification`.
+pub fn neg_sub() -> Law {
+    Law::new(
+        "neg_sub",
+        Pat::op(
+            "neg",
+            vec![Pat::op("sub", vec![Pat::var("a"), Pat::var("b")])],
+        ),
+        Pat::op("sub", vec![Pat::var("b"), Pat::var("a")]),
+    )
+    .with_law("−(a−b) = b−a.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `sub_zero_to_neg`: `sub(0, u) → neg(u)`.
+///
+/// Python: `priorart.py` `SUB_ZERO_TO_NEG`, tags
+/// `prior_art`+`simplification`.
+pub fn sub_zero_to_neg() -> Law {
+    Law::new(
+        "sub_zero_to_neg",
+        Pat::op("sub", vec![Pat::constant(json!(0)), Pat::var("u")]),
+        Pat::op("neg", vec![Pat::var("u")]),
+    )
+    .with_law("0 − u = −u.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `id_sub`: `sub(u, 0) → u`.
+///
+/// Python: `priorart.py` `ID_SUB`, tags `prior_art`+`simplification`.
+pub fn id_sub() -> Law {
+    Law::new(
+        "id_sub",
+        Pat::op("sub", vec![Pat::var("u"), Pat::constant(json!(0))]),
+        Pat::var("u"),
+    )
+    .with_law("u − 0 = u.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `id_div`: `div(u, 1) → u`.
+///
+/// Python: `priorart.py` `ID_DIV`, tags `prior_art`+`simplification`.
+pub fn id_div() -> Law {
+    Law::new(
+        "id_div",
+        Pat::op("div", vec![Pat::var("u"), Pat::constant(json!(1))]),
+        Pat::var("u"),
+    )
+    .with_law("u/1 = u.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `add_self`: `add(u, u) → mul(u, 2)` — the strength reduction.
+///
+/// Python: `priorart.py` `ADD_SELF`, tags `prior_art`+`simplification`.
+pub fn add_self() -> Law {
+    Law::new(
+        "add_self",
+        Pat::op("add", vec![Pat::var("u"), Pat::var("u")]),
+        Pat::op("mul", vec![Pat::var("u"), Pat::constant(json!(2))]),
+    )
+    .with_law("u+u = 2u — the strength reduction.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `mul2_to_add`: `mul(u, 2) → add(u, u)` — the sharing direction,
+/// derivation `add_self`.
+///
+/// Python: `priorart.py` `MUL2_TO_ADD`, tags
+/// `prior_art`+`simplification`.
+pub fn mul2_to_add() -> Law {
+    Law::new(
+        "mul2_to_add",
+        Pat::op("mul", vec![Pat::var("u"), Pat::constant(json!(2))]),
+        Pat::op("add", vec![Pat::var("u"), Pat::var("u")]),
+    )
+    .with_law("2u = u+u — the sharing direction.")
+    .with_derivation("add_self")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `mul_neg1`: `mul(u, −1) → neg(u)`.
+///
+/// Python: `priorart.py` `MUL_NEG1`, tags `prior_art`+`simplification`.
+pub fn mul_neg1() -> Law {
+    Law::new(
+        "mul_neg1",
+        Pat::op("mul", vec![Pat::var("u"), Pat::constant(json!(-1))]),
+        Pat::op("neg", vec![Pat::var("u")]),
+    )
+    .with_law("u·(−1) = −u.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// The `_zeros_like` family: `op(u, unit_like(v)) → u` guarded by the
+/// grid-equality pair — `u` and `v` must broadcast AND the result
+/// shape must BE `u`'s (a smaller `u` broadcasting up produces the
+/// grid shape, not `u`).
+///
+/// Python: `priorart.py` `_zeros_like`, tags
+/// `prior_art`+`simplification`.
+fn unit_like_rule(op: &str, unit: &str) -> Law {
+    let name = format!("{op}_{unit}like_r");
+    let law = format!(
+        "{op}(u, {unit}_like(v)) = u — the spelled additive/multiplicative unit (grid-equality guard keeps it honest)."
+    );
+    Law::new(
+        name,
+        Pat::op(
+            op,
+            vec![
+                Pat::var("u"),
+                Pat::op(format!("{unit}_like"), vec![Pat::var("v")]),
+            ],
+        ),
+        Pat::var("u"),
+    )
+    .with_law(law)
+    .with_cond(json!([
+        "and",
+        ["shaped", ["bcast", "u", "v"]],
+        ["shape-eq", "u", ["bcast", "u", "v"]]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `add_zeroslike_r`: `add(u, zeros_like(v)) → u`.
+///
+/// Python: `priorart.py` `ADD_ZEROS_R`, tags
+/// `prior_art`+`simplification`.
+pub fn add_zeroslike_r() -> Law {
+    unit_like_rule("add", "zeros")
+}
+
+/// `sub_zeroslike_r`: `sub(u, zeros_like(v)) → u`.
+///
+/// Python: `priorart.py` `SUB_ZEROS_R`, tags
+/// `prior_art`+`simplification`.
+pub fn sub_zeroslike_r() -> Law {
+    unit_like_rule("sub", "zeros")
+}
+
+/// `mul_oneslike_r`: `mul(u, ones_like(v)) → u`.
+///
+/// Python: `priorart.py` `MUL_ONES_R`, tags
+/// `prior_art`+`simplification`.
+pub fn mul_oneslike_r() -> Law {
+    unit_like_rule("mul", "ones")
+}
+
+/// `div_oneslike_r`: `div(u, ones_like(v)) → u`.
+///
+/// Python: `priorart.py` `DIV_ONES_R`, tags
+/// `prior_art`+`simplification`.
+pub fn div_oneslike_r() -> Law {
+    unit_like_rule("div", "ones")
 }
 
 // ---------------------------------------------------------------------------
@@ -4916,31 +5404,69 @@ pub fn attention() -> Vec<Law> {
     laws
 }
 
-/// The stage-1-portable slice of `PRIOR_ART_RULES` (Python order):
+/// The portable slice of `PRIOR_ART_RULES` (Python order):
 /// the activation folds (`sigmoid_fold`, `sigmoid_fold_div`,
-/// `tanh_fold`, `hardsigmoid_fold`), the const-algebra family
-/// (`pow_one`/`pow_zero`/`pow_neg_one`/`pow_half`, `sqrt_to_pow`,
-/// `div_one_recip`, `recip_expand`, `neg_const`, the
-/// `mul_const_assoc_*`/`add_const_assoc_*` families,
+/// `tanh_fold`, `hardsigmoid_fold`), the §2 pointwise
+/// idempotence/parity family (`abs_*`, `sqrt_square`,
+/// `rsqrt_square`, `maximum_idem`/`minimum_idem`, the odd/even
+/// `*_neg` slides, `exp_neg_recip`, `log_exp`, `log_recip`), the
+/// const-algebra family (`pow_one`/`pow_zero`/`pow_neg_one`/
+/// `pow_half`, `sqrt_to_pow`, `recip_recip`, `div_one_recip`,
+/// `recip_expand`, the `add/sub/neg` const-free folds, `id_sub`,
+/// `id_div`, `add_self`/`mul2_to_add`, `mul_neg1`, `neg_const`,
+/// the `mul_const_assoc_*`/`add_const_assoc_*` families,
 /// `sub_const_sub`, `sub_const_sub_l`, `div_const_div`,
-/// `div_const_to_mul`, `mul_const_div`). Every other member reads
+/// `div_const_to_mul`, `mul_const_div`), and the spelled-unit
+/// folds (`add_zeroslike_r`/`sub_zeroslike_r`/`mul_oneslike_r`/
+/// `div_oneslike_r`) whose `shaped`/`shape-eq`/`bcast` grid guard
+/// rides the ported shape vocabulary. Every other member reads
 /// shapes (`shape`/`dim` specs, `attr-range`, `rank`, broadcast
-/// predicates) or tensor channels — unported — or is unguarded but
-/// outside this slice's region. Deliberately NOT in [`all`],
-/// mirroring the Python bank's opt-in `prior_art` preset.
+/// predicates) or tensor channels — unported — carries procedural
+/// `check`/`derive` hooks, or is unguarded but outside this
+/// slice's region. Deliberately NOT in [`all`], mirroring the
+/// Python bank's opt-in `prior_art` preset.
 pub fn prior_art() -> Vec<Law> {
     let mut laws = vec![
         sigmoid_fold(),
         sigmoid_fold_div(),
         tanh_fold(),
         hardsigmoid_fold(),
+        // -- §2 pointwise idempotence / parity
+        abs_idem(),
+        abs_square(),
+        square_abs(),
+        abs_neg(),
+        sqrt_square(),
+        rsqrt_square(),
+        maximum_idem(),
+        minimum_idem(),
+        tanh_neg(),
+        sigmoid_neg(),
+        softsign_neg(),
+        erf_neg(),
+        sin_neg(),
+        cos_neg(),
+        exp_neg_recip(),
+        log_exp(),
+        log_recip(),
+        // -- §2 scalar/Const algebra
         pow_one(),
         pow_zero(),
         pow_neg_one(),
         pow_half(),
         sqrt_to_pow(),
+        recip_recip(),
         div_one_recip(),
         recip_expand(),
+        add_neg_to_sub(),
+        sub_neg_to_add(),
+        neg_sub(),
+        sub_zero_to_neg(),
+        id_sub(),
+        id_div(),
+        add_self(),
+        mul2_to_add(),
+        mul_neg1(),
         neg_const(),
     ];
     laws.extend(mul_const_assoc_rules());
@@ -4951,6 +5477,11 @@ pub fn prior_art() -> Vec<Law> {
         div_const_div(),
         div_const_to_mul(),
         mul_const_div(),
+        // -- §2 spelled-unit folds
+        add_zeroslike_r(),
+        sub_zeroslike_r(),
+        mul_oneslike_r(),
+        div_oneslike_r(),
     ]);
     laws
 }
