@@ -152,10 +152,57 @@ pub struct TensorInfo {
     pub dtype: Option<AttrValue>,
 }
 
-/// The memo table [`infer`]/[`shape_of`] share — `Term` is `Hash +
-/// Eq`, so structural sharing memoises the DAG walk exactly like the
-/// Python `id()`-keyed memo does for interned `Op`s.
-pub type Memo = HashMap<Term, TensorInfo>;
+/// The memo table [`infer`]/[`shape_of`] share — keyed by node
+/// *identity*, not structure.
+///
+/// `Term`'s derived `Hash`/`Eq` walks the fully-expanded tree, which
+/// is exponential on the Rc-shared DAGs `dag.program` input and
+/// `min_term_cached` extraction produce (the same blow-up
+/// `handl_egraph::extract`'s `TermKey` and `crate::dag::NodeKey`
+/// solved for cost/pricing walks). The key is the
+/// `(tag, ptr, len-or-ptr2, ptr3)` identity tuple those modules
+/// spell as a struct — inlined here so the public alias names only
+/// public types. Pointer-equal `Rc` allocations are the same node;
+/// pointer-distinct terms merely miss and recompute — the memo never
+/// changes a *value*, only dedup work, so e-class merges (which never
+/// mutate terms) cannot stale an entry.
+///
+/// The value keeps the `Term` alongside its [`TensorInfo`] so the
+/// `Rc`s the keys point into cannot be freed and their addresses
+/// reused while the memo lives.
+pub type Memo = HashMap<(u8, usize, usize, usize), (TensorInfo, Term)>;
+
+/// `(tag, ptr, len-or-ptr2, ptr3)` identity of a term node — the
+/// `crate::dag::NodeKey` layout, kept tuple-shaped for the public
+/// [`Memo`] alias.
+fn term_key(t: &Term) -> (u8, usize, usize, usize) {
+    match t {
+        // `Rc<str>`'s own `as_ptr` is the *fat* `*const str` — go
+        // through `str::as_bytes` for the thin data pointer.
+        Term::Var(n) => (0, n.as_bytes().as_ptr() as usize, n.len(), 0),
+        Term::Leaf(k) => (1, k.as_bytes().as_ptr() as usize, k.len(), 0),
+        Term::Op(o) => (
+            2,
+            o.op.as_bytes().as_ptr() as usize,
+            o.args.as_ptr() as usize,
+            o.attrs.as_ptr() as usize,
+        ),
+    }
+}
+
+/// Look up a memoised [`TensorInfo`] by node identity.
+fn memo_info<'m>(memo: &'m Memo, t: &Term) -> Option<&'m TensorInfo> {
+    memo.get(&term_key(t)).map(|(info, _)| info)
+}
+
+/// Work budget for one [`infer_postorder`] walk — a cap on distinct
+/// node inferences, not a time limit. Generous by construction: the
+/// e-graph's own node caps (`max_nodes`, typically ~10⁴) bound every
+/// legitimate term far below this; the cap exists so a pathological
+/// input *declines* — unvisited nodes read as [`Shape::Unknown`],
+/// the standard "cannot prove" channel every guard already honours —
+/// instead of hanging the search.
+const INFER_NODE_BUDGET: usize = 1 << 18;
 
 /// Infer [`TensorInfo`] for `t` — shape and dtype, one postorder DAG
 /// walk (the `_shape_of` iterative-frontier port; deep terms cannot
@@ -169,7 +216,7 @@ pub fn infer(t: &Term) -> TensorInfo {
 /// candidates reuse one table.
 pub fn infer_with(t: &Term, memo: &mut Memo) -> TensorInfo {
     infer_postorder(t, memo);
-    memo.get(t).cloned().unwrap_or(TensorInfo {
+    memo_info(memo, t).cloned().unwrap_or(TensorInfo {
         shape: Shape::Unknown,
         dtype: None,
     })
@@ -195,21 +242,36 @@ pub fn dtype_of(t: &Term) -> Option<AttrValue> {
 /// `postorder(term, prune=…)` port).
 fn infer_postorder(t: &Term, memo: &mut Memo) {
     let mut stack: Vec<(Term, bool)> = vec![(t.clone(), false)];
+    let mut budget = INFER_NODE_BUDGET;
     while let Some((node, expanded)) = stack.pop() {
-        if memo.contains_key(&node) {
+        let key = term_key(&node);
+        if memo.contains_key(&key) {
             continue;
         }
         if !expanded {
             stack.push((node.clone(), true));
             for child in node_children(&node) {
-                if !memo.contains_key(child) {
+                if !memo.contains_key(&term_key(child)) {
                     stack.push((child.clone(), false));
                 }
             }
             continue;
         }
+        if budget == 0 {
+            // Budget exhausted: stop the walk. Everything left
+            // unvisited reads as `Shape::Unknown` downstream — the
+            // honest decline — so a pathological term vetoes guards
+            // rather than hanging them.
+            if std::env::var_os("EQSAT_DEBUG").is_some() {
+                eprintln!("[eqsat-dbg] shape infer node budget exhausted");
+            }
+            break;
+        }
+        budget -= 1;
         let info = infer_node(&node, memo);
-        memo.insert(node, info);
+        // The value keeps `node` alive so `key`'s pointers stay
+        // valid for the memo's lifetime.
+        memo.insert(key, (info, node));
     }
 }
 
@@ -738,14 +800,14 @@ fn infer_op(o: &Op, memo: &Memo) -> TensorInfo {
     let shapes: Vec<Shape> = args
         .iter()
         .map(|a| {
-            memo.get(a)
+            memo_info(memo, a)
                 .map(|i| i.shape.clone())
                 .unwrap_or(Shape::Unknown)
         })
         .collect();
     let dtype0 = args
         .first()
-        .and_then(|a| memo.get(a))
+        .and_then(|a| memo_info(memo, a))
         .and_then(|i| i.dtype.clone());
     let dtype = attr_of(o, &["dtype"]).cloned().or(dtype0);
     let shape = infer_op_shape(name, o, args, &shapes);
