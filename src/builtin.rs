@@ -33,9 +33,14 @@
 //!   composition/scale laws, scalar naturality and `split_scalar_*`,
 //!   the product-structure fuses `qkv_fuse`/`qkv_fuse_asym`,
 //!   `gqa_absorb_repeat`, the `sdpa_fold*` family).
-//! * [`attention`] — the full `SDPA_EXPAND_RULES` (all eight
-//!   key-sets; the scale-free spellings mint `1/√(q[-1])` through
-//!   the `dim` dspec channel).
+//! * [`attention`] — `ATTENTION_RULES` + `SDPA_EXPAND_RULES`: the
+//!   36 portable `laws/attention.py` members (rope scale
+//!   commutation, right-multiply absorb, score-scale migration,
+//!   uniform view-scale) ahead of the full `SDPA_EXPAND_RULES`
+//!   (all eight key-sets; the scale-free spellings mint
+//!   `1/√(q[-1])` through the `dim` dspec channel).
+//!   `rope_cat_compose` stays Python-side — its half-split guard
+//!   needs attr-arithmetic the `cond` vocabulary cannot form.
 //! * [`batch_norm`] — `BATCH_NORM_RULES`, the opt-in eval-mode
 //!   `batch_norm` expand triple (`$leaf:` Const mint + the
 //!   `concat`/`take`/`len` channel-view dspec).
@@ -3675,6 +3680,605 @@ pub fn conv_folds() -> Vec<Law> {
 }
 
 // ---------------------------------------------------------------------------
+//  Attention-path laws — `ATTENTION_RULES` (laws/attention.py)
+// ---------------------------------------------------------------------------
+//
+// Rotary (RoPE) and score-scale algebra over the exported elementwise
+// spellings: the half-split cat and rotate-half rotary patterns, the
+// rank-2 right-multiply absorb into projection weights, the
+// score-scale migration (left-matmul naturality, `linear` out-scale,
+// uniform-factor commutation through every view op in the spellings).
+// Opt-in like the Python collection — the commutation pairs are
+// closure-generating — and carried in the `attention` pack ahead of
+// `SDPA_EXPAND_RULES`, mirroring the Python `ATTENTION` ruleset's
+// `ATTENTION_RULES + SDPA_EXPAND_RULES` order.
+//
+// `rope_cat_compose` stays Python-side: its `_check_rope_cat_compose`
+// hook relates six slice-attr bounds to the feature-axis extent by
+// arithmetic the guard vocabulary cannot form — a common `dim % rank`
+// axis across six attr metavars, `width == 2·(end−start)` against a
+// *shape dim*, and `end ≥ width` sentinel reads. `attr-cmp` compares
+// attr exprs and `attr-cmp-dim`/`dim-eq-attr` compare attr-vs-dim or
+// dim-vs-dim, but no predicate equates a shape dim to an attr
+// expression, so the half-split guard has no faithful `cond` spelling.
+// Declined by name, not weakened.
+
+/// `_slice(t, pre)` — the unstrided `slice` spelling with
+/// `{pre}D`/`{pre}A`/`{pre}E` attr metavars. Strided slices carry
+/// `step` and do not match — exact-keyset, like the Python pattern.
+fn att_slice(t: Pat, pre: &str) -> Pat {
+    let (d, a, e) = (format!("{pre}D"), format!("{pre}A"), format!("{pre}E"));
+    Pat::Op(OpPat::new("slice").arg(t).attrs_fields(afields(vec![
+        ("dim", af_bind(d.as_str())),
+        ("start", af_bind(a.as_str())),
+        ("end", af_bind(e.as_str())),
+    ])))
+}
+
+/// `_rope_cat(x, C, S, p1, p2, cd)` — the half-split rotary:
+/// `concat(sub(x1·C, x2·S), add(x2·C, x1·S), dim=cd)` over the two
+/// contiguous slices `p1`/`p2`.
+fn rope_cat(x: Pat, c: &str, s: &str, p1: &str, p2: &str, cd: &str) -> Pat {
+    let x1 = att_slice(x.clone(), p1);
+    let x2 = att_slice(x, p2);
+    Pat::Op(
+        OpPat::new("concat")
+            .arg(Pat::op(
+                "sub",
+                vec![
+                    Pat::op("mul", vec![x1.clone(), Pat::var(c)]),
+                    Pat::op("mul", vec![x2.clone(), Pat::var(s)]),
+                ],
+            ))
+            .arg(Pat::op(
+                "add",
+                vec![
+                    Pat::op("mul", vec![x2, Pat::var(c)]),
+                    Pat::op("mul", vec![x1, Pat::var(s)]),
+                ],
+            ))
+            .attrs_fields(afields(vec![("dim", af_bind(cd))])),
+    )
+}
+
+/// `_rope_rh(x, C, S, p1, p2, cd)` — the rotate-half rotary:
+/// `x·C + concat(−x2, x1)·S` (`p2` namespaces the negated slice,
+/// `p1` the plain one).
+fn rope_rh(x: Pat, c: &str, s: &str, p1: &str, p2: &str, cd: &str) -> Pat {
+    Pat::op(
+        "add",
+        vec![
+            Pat::op("mul", vec![x.clone(), Pat::var(c)]),
+            Pat::op(
+                "mul",
+                vec![
+                    Pat::Op(
+                        OpPat::new("concat")
+                            .arg(Pat::op("neg", vec![att_slice(x.clone(), p2)]))
+                            .arg(att_slice(x, p1))
+                            .attrs_fields(afields(vec![("dim", af_bind(cd))])),
+                    ),
+                    Pat::var(s),
+                ],
+            ),
+        ],
+    )
+}
+
+/// `_check_rope_scale` — `a` may slide through a rotary: scalar, or
+/// a last-dim-1 factor broadcasting into `x` (per-row pair-constant).
+/// The Python hook's `_shape_of`/`_broadcast` reads are the
+/// `scalar`/`dim-eq-const`/`bcast-into` shape channels; a `None`
+/// last dim declines exactly like Python's `sa[-1] != 1`.
+fn cond_rope_scale() -> Value {
+    json!([
+        "or",
+        ["scalar", "a"],
+        [
+            "and",
+            ["dim-eq-const", "a", -1, 1],
+            ["bcast-into", "a", "x"]
+        ]
+    ])
+}
+
+/// `_check_left_scale` — `s` slides between `mul(A@B, s)` and
+/// `matmul(A·s, B)`: scalar or last-dim-1, broadcasting into the
+/// matmul output, which must be well-formed (`mm-shape-ok` — the
+/// Python hook's `_matmul_shape(...) is None` veto, kept as a
+/// top-level conjunct because the scalar arm skips the broadcast
+/// read but not the shape check).
+fn cond_left_scale() -> Value {
+    json!([
+        "and",
+        ["shaped", "s"],
+        ["mm-shape-ok", "A", "B"],
+        [
+            "or",
+            ["scalar", "s"],
+            [
+                "and",
+                ["dim-eq-const", "s", -1, 1],
+                ["bcast-into", "s", ["mm-out", "A", "B"]]
+            ]
+        ]
+    ])
+}
+
+/// `_check_linear_mm_absorb` — `linear(x,W)@R` folds only for
+/// rank-2 `W`/`R` whose contraction dims agree (`None` dims are
+/// wildcards — `dim-compat`, not `dim-eq`).
+fn cond_mm_absorb() -> Value {
+    json!([
+        "and",
+        ["rank", "W", "==", 2],
+        ["rank", "R", "==", 2],
+        ["dim-compat", "R", 0, "W", 0]
+    ])
+}
+
+/// `_check_linear_mm_absorb_bias` — the biased absorb adds the
+/// `b@R` matvec: `b` rank-1 with `b[0]` `None`-wildcard-equal to
+/// `W[0]`.
+fn cond_mm_absorb_bias() -> Value {
+    json!([
+        "and",
+        ["rank", "W", "==", 2],
+        ["rank", "R", "==", 2],
+        ["dim-compat", "R", 0, "W", 0],
+        ["rank", "b", "==", 1],
+        ["dim-compat", "b", 0, "W", 0]
+    ])
+}
+
+/// `_is_uniform` — scalar or all-dims-1 broadcast, an
+/// elementwise-constant factor (`uniform` reads the same tuple
+/// check: `None` dims are not `1`).
+fn cond_uniform(var: &str) -> Value {
+    json!(["uniform", var])
+}
+
+/// The 24 `_VIEW_SCALE_RULES` — `mul(view(t), a) ↔ view(mul(t), a)`
+/// for every view op in the attention spellings, both directions,
+/// plus the `concat`/`stack` two-operand distribution. Uniform
+/// factors only — the Python `_check_uniform` hook.
+fn view_scale_rules() -> Vec<Law> {
+    /// One unary view op: `(rule-name infix, op name, attrs fields)`.
+    type ViewSpec = (&'static str, &'static str, Vec<(&'static str, AttrField)>);
+    let views: Vec<ViewSpec> = vec![
+        (
+            "transpose",
+            "transpose",
+            vec![("dim0", af_bind("D0")), ("dim1", af_bind("D1"))],
+        ),
+        ("reshape", "reshape", vec![("shape", af_bind("SH"))]),
+        (
+            "slice",
+            "slice",
+            vec![
+                ("dim", af_bind("D")),
+                ("start", af_bind("A")),
+                ("end", af_bind("E")),
+            ],
+        ),
+        (
+            "slice_step",
+            "slice",
+            vec![
+                ("dim", af_bind("D")),
+                ("start", af_bind("A")),
+                ("end", af_bind("E")),
+                ("step", af_bind("P")),
+            ],
+        ),
+        (
+            "unbind",
+            "unbind",
+            vec![("dim", af_bind("D")), ("index", af_bind("I"))],
+        ),
+        (
+            "chunk",
+            "chunk",
+            vec![
+                ("chunks", af_bind("N")),
+                ("dim", af_bind("D")),
+                ("index", af_bind("I")),
+            ],
+        ),
+        ("flatten", "flatten", vec![("start_dim", af_bind("F0"))]),
+        (
+            "flatten2",
+            "flatten",
+            vec![("start_dim", af_bind("F0")), ("end_dim", af_bind("F1"))],
+        ),
+        ("unsqueeze", "unsqueeze", vec![("dim", af_bind("D"))]),
+        ("squeeze", "squeeze", vec![("dim", af_bind("D"))]),
+    ];
+    let view = |op: &str, fields: &[(&'static str, AttrField)], t: Pat| {
+        Pat::Op(OpPat::new(op).arg(t).attrs_fields(afields(fields.to_vec())))
+    };
+    let mut rules = Vec::with_capacity(24);
+    for &(name, op, ref fields) in &views {
+        let cond = cond_uniform("a");
+        rules.push(
+            Law::new(
+                format!("scale_in_{name}"),
+                Pat::op(
+                    "mul",
+                    vec![view(op, fields, Pat::var("t")), Pat::var("a")],
+                ),
+                view(
+                    op,
+                    fields,
+                    Pat::op("mul", vec![Pat::var("t"), Pat::var("a")]),
+                ),
+            )
+            .with_law(format!(
+                "Uniform factor commutes into {name}: a·view(t) = view(a·t) — the elementwise-constant scale rides through any relayout."
+            ))
+            .with_cond(cond.clone())
+            .with_tag("attention")
+            .with_tag("expansive"),
+        );
+        rules.push(
+            Law::new(
+                format!("scale_out_{name}"),
+                view(
+                    op,
+                    fields,
+                    Pat::op("mul", vec![Pat::var("t"), Pat::var("a")]),
+                ),
+                Pat::op(
+                    "mul",
+                    vec![view(op, fields, Pat::var("t")), Pat::var("a")],
+                ),
+            )
+            .with_law(format!(
+                "Reverse uniform commutation out of {name} — factors a shared scale back to the view's output."
+            ))
+            .with_cond(cond)
+            .with_tag("attention")
+            .with_tag("expansive"),
+        );
+    }
+    for name in ["concat", "stack"] {
+        let shared = Pat::Op(
+            OpPat::new(name)
+                .arg(Pat::op("mul", vec![Pat::var("t1"), Pat::var("a")]))
+                .arg(Pat::op("mul", vec![Pat::var("t2"), Pat::var("a")]))
+                .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+        );
+        let join = Pat::Op(
+            OpPat::new(name)
+                .arg(Pat::var("t1"))
+                .arg(Pat::var("t2"))
+                .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+        );
+        let cond = cond_uniform("a");
+        rules.push(
+            Law::new(
+                format!("scale_in_{name}"),
+                Pat::op("mul", vec![join.clone(), Pat::var("a")]),
+                shared.clone(),
+            )
+            .with_law(format!(
+                "Uniform factor distributes into {name}: a·cat(u,v) = cat(a·u, a·v)."
+            ))
+            .with_cond(cond.clone())
+            .with_tag("attention")
+            .with_tag("expansive"),
+        );
+        rules.push(
+            Law::new(
+                format!("scale_out_{name}"),
+                shared,
+                Pat::op("mul", vec![join, Pat::var("a")]),
+            )
+            .with_law(format!("Reverse: shared uniform factors out of {name}."))
+            .with_cond(cond)
+            .with_tag("attention")
+            .with_tag("expansive"),
+        );
+    }
+    rules
+}
+
+/// `ATTENTION_RULES` minus `rope_cat_compose` — the 36 portable
+/// members in Python collection order: the four rotary scale
+/// commutations, the four right-multiply absorbs, the four
+/// score-scale migrations, then the 24 view-scale rules.
+/// `rope_cat_compose` is declined by name (see the section header).
+fn attention_path_rules() -> Vec<Law> {
+    let fus = |l: Law| l.with_tag("attention").with_tag("fusion");
+    let exp = |l: Law| l.with_tag("attention").with_tag("expansive");
+    let mut laws = vec![
+        // Rotary is x-linear — both spellings × both directions.
+        exp(
+            Law::new(
+                "rope_cat_scale_out",
+                rope_cat(
+                    Pat::op("mul", vec![Pat::var("x"), Pat::var("a")]),
+                    "C",
+                    "S",
+                    "I1",
+                    "I2",
+                    "CD",
+                ),
+                Pat::op(
+                    "mul",
+                    vec![rope_cat(Pat::var("x"), "C", "S", "I1", "I2", "CD"), Pat::var("a")],
+                ),
+            )
+            .with_law(
+                "Rotary is linear in x: rope(a·x) = a·rope(x) for a pair-constant factor — a scalar or per-row broadcast rides outside the whole elementwise chain.",
+            )
+            .with_cond(cond_rope_scale()),
+        ),
+        exp(
+            Law::new(
+                "rope_cat_scale_in",
+                Pat::op(
+                    "mul",
+                    vec![rope_cat(Pat::var("x"), "C", "S", "I1", "I2", "CD"), Pat::var("a")],
+                ),
+                rope_cat(
+                    Pat::op("mul", vec![Pat::var("x"), Pat::var("a")]),
+                    "C",
+                    "S",
+                    "I1",
+                    "I2",
+                    "CD",
+                ),
+            )
+            .with_law(
+                "Reverse: push a uniform factor inside the rotary so the view/weight laws can route it into a projection.",
+            )
+            .with_cond(cond_rope_scale()),
+        ),
+        exp(
+            Law::new(
+                "rope_rh_scale_out",
+                rope_rh(
+                    Pat::op("mul", vec![Pat::var("x"), Pat::var("a")]),
+                    "C",
+                    "S",
+                    "I1",
+                    "I2",
+                    "CD",
+                ),
+                Pat::op(
+                    "mul",
+                    vec![rope_rh(Pat::var("x"), "C", "S", "I1", "I2", "CD"), Pat::var("a")],
+                ),
+            )
+            .with_law(
+                "x·cos + rotate_half(x)·sin is also x-linear: a uniform factor rides out of the HF spelling.",
+            )
+            .with_cond(cond_rope_scale()),
+        ),
+        exp(
+            Law::new(
+                "rope_rh_scale_in",
+                Pat::op(
+                    "mul",
+                    vec![rope_rh(Pat::var("x"), "C", "S", "I1", "I2", "CD"), Pat::var("a")],
+                ),
+                rope_rh(
+                    Pat::op("mul", vec![Pat::var("x"), Pat::var("a")]),
+                    "C",
+                    "S",
+                    "I1",
+                    "I2",
+                    "CD",
+                ),
+            )
+            .with_law(
+                "Reverse: push a uniform factor inside the rotate-half spelling.",
+            )
+            .with_cond(cond_rope_scale()),
+        ),
+        // Right-multiply absorb — `(x@Wᵀ)@R = x@(RᵀW)ᵀ = linear(x, RᵀW)`.
+        fus(
+            Law::new(
+                "linear_mm_absorb",
+                Pat::op(
+                    "matmul",
+                    vec![Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]), Pat::var("R")],
+                ),
+                Pat::op(
+                    "linear",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op(
+                            "matmul",
+                            vec![
+                                Pat::Op(
+                                    OpPat::new("transpose")
+                                        .arg(Pat::var("R"))
+                                        .attrs_lit(json!({"dim0": -2, "dim1": -1})),
+                                ),
+                                Pat::var("W"),
+                            ],
+                        ),
+                    ],
+                ),
+            )
+            .with_law(
+                "(xWᵀ)R = x(RᵀW)ᵀ — a constant right-multiply absorbs into the projection weight (rotary-by-matmul included).",
+            )
+            .with_cond(cond_mm_absorb()),
+        ),
+        exp(
+            Law::new(
+                "linear_mm_absorb_rev",
+                Pat::op(
+                    "linear",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op(
+                            "matmul",
+                            vec![
+                                Pat::Op(
+                                    OpPat::new("transpose")
+                                        .arg(Pat::var("R"))
+                                        .attrs_lit(json!({"dim0": -2, "dim1": -1})),
+                                ),
+                                Pat::var("W"),
+                            ],
+                        ),
+                    ],
+                ),
+                Pat::op(
+                    "matmul",
+                    vec![Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]), Pat::var("R")],
+                ),
+            )
+            .with_law(
+                "Reverse absorb — eqsat weighs the folded weight against a runtime right-multiply.",
+            )
+            .with_cond(cond_mm_absorb()),
+        ),
+        fus(
+            Law::new(
+                "linear_mm_absorb_bias",
+                Pat::op(
+                    "matmul",
+                    vec![
+                        Pat::op("linear", vec![Pat::var("x"), Pat::var("W"), Pat::var("b")]),
+                        Pat::var("R"),
+                    ],
+                ),
+                Pat::op(
+                    "linear",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op(
+                            "matmul",
+                            vec![
+                                Pat::Op(
+                                    OpPat::new("transpose")
+                                        .arg(Pat::var("R"))
+                                        .attrs_lit(json!({"dim0": -2, "dim1": -1})),
+                                ),
+                                Pat::var("W"),
+                            ],
+                        ),
+                        Pat::op("matmul", vec![Pat::var("b"), Pat::var("R")]),
+                    ],
+                ),
+            )
+            .with_law(
+                "Affine right-multiply absorb: (xWᵀ + b)R = x(RᵀW)ᵀ + bR — the fused bias is the matvec b@R, both products compile-time.",
+            )
+            .with_cond(cond_mm_absorb_bias()),
+        ),
+        exp(
+            Law::new(
+                "linear_mm_absorb_bias_rev",
+                Pat::op(
+                    "linear",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op(
+                            "matmul",
+                            vec![
+                                Pat::Op(
+                                    OpPat::new("transpose")
+                                        .arg(Pat::var("R"))
+                                        .attrs_lit(json!({"dim0": -2, "dim1": -1})),
+                                ),
+                                Pat::var("W"),
+                            ],
+                        ),
+                        Pat::op("matmul", vec![Pat::var("b"), Pat::var("R")]),
+                    ],
+                ),
+                Pat::op(
+                    "matmul",
+                    vec![
+                        Pat::op("linear", vec![Pat::var("x"), Pat::var("W"), Pat::var("b")]),
+                        Pat::var("R"),
+                    ],
+                ),
+            )
+            .with_law("Reverse biased absorb (eqsat weighs fused vs split).")
+            .with_cond(cond_mm_absorb_bias()),
+        ),
+        // Score-scale migration.
+        exp(
+            Law::new(
+                "naturality_scalar_left",
+                Pat::op(
+                    "matmul",
+                    vec![Pat::op("mul", vec![Pat::var("A"), Pat::var("s")]), Pat::var("B")],
+                ),
+                Pat::op(
+                    "mul",
+                    vec![Pat::op("matmul", vec![Pat::var("A"), Pat::var("B")]), Pat::var("s")],
+                ),
+            )
+            .with_law(
+                "Row-uniform scale slides out of a matmul's left operand: (s·A)@B = s·(A@B) — the left mirror of naturality_scalar.",
+            )
+            .with_cond(cond_left_scale()),
+        ),
+        exp(
+            Law::new(
+                "naturality_scalar_left_rev",
+                Pat::op(
+                    "mul",
+                    vec![Pat::op("matmul", vec![Pat::var("A"), Pat::var("B")]), Pat::var("s")],
+                ),
+                Pat::op(
+                    "matmul",
+                    vec![Pat::op("mul", vec![Pat::var("A"), Pat::var("s")]), Pat::var("B")],
+                ),
+            )
+            .with_law(
+                "Reverse: s·(A@B) = (s·A)@B — pushes a score scale into the left factor, where the view/weight laws route it to Wq.",
+            )
+            .with_cond(cond_left_scale()),
+        ),
+        fus(
+            Law::new(
+                "linear_out_scale",
+                Pat::op(
+                    "mul",
+                    vec![Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]), Pat::var("s")],
+                ),
+                Pat::op(
+                    "linear",
+                    vec![Pat::var("x"), Pat::op("mul", vec![Pat::var("W"), Pat::var("s")])],
+                ),
+            )
+            .with_law(
+                "Uniform scale folds into the weight: s·(xWᵀ) = x(sW)ᵀ — the runtime mul becomes a compile-time weight mul.",
+            )
+            .with_cond(cond_uniform("s")),
+        ),
+        exp(
+            Law::new(
+                "linear_out_scale_rev",
+                Pat::op(
+                    "linear",
+                    vec![Pat::var("x"), Pat::op("mul", vec![Pat::var("W"), Pat::var("s")])],
+                ),
+                Pat::op(
+                    "mul",
+                    vec![Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]), Pat::var("s")],
+                ),
+            )
+            .with_law(
+                "Reverse uniform fold — eqsat compares weight-folded vs runtime-scaled forms.",
+            )
+            .with_cond(cond_uniform("s")),
+        ),
+    ];
+    laws.extend(view_scale_rules());
+    laws
+}
+
+// ---------------------------------------------------------------------------
 //  Scan monoids — `SCAN_LAWS` / `SCAN_DIAG_LAWS` (laws/scan.py)
 // ---------------------------------------------------------------------------
 //
@@ -4295,15 +4899,21 @@ pub fn categorical() -> Vec<Law> {
     laws
 }
 
-/// The full `SDPA_EXPAND_RULES` — all eight key-sets (the four
-/// scale-free spellings mint `1/√(q[-1])` through the `dim` shape
-/// channel; ported at stage 4). Opt-in `attention` preset, tag
-/// `attention`. `batch_norm_expand*` and the 60-law
+/// The `ATTENTION_RULES` + `SDPA_EXPAND_RULES` opt-in pack — the
+/// Python `ATTENTION` ruleset's order: the 36 portable
+/// `laws/attention.py` members (rope scale commutation, the
+/// right-multiply absorbs, score-scale migration, the 24 uniform
+/// view-scale rules; `rope_cat_compose` declined — see the section
+/// header) ahead of the full `SDPA_EXPAND_RULES` (all eight
+/// key-sets; the scale-free spellings mint `1/√(q[-1])` through the
+/// `dim` dspec channel). `batch_norm_expand*` and the 60-law
 /// `conv_channel_*` family live in their own opt-in packs
 /// ([`batch_norm`], [`conv_folds`]) — Python keeps them out of
 /// `ALL_RULES`/`DEFAULT` the same way.
 pub fn attention() -> Vec<Law> {
-    sdpa_expand_rules()
+    let mut laws = attention_path_rules();
+    laws.extend(sdpa_expand_rules());
+    laws
 }
 
 /// The stage-1-portable slice of `PRIOR_ART_RULES` (Python order):

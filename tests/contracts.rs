@@ -622,11 +622,19 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     assert_eq!(pf.laws(), builtin::pointwise_factor().as_slice());
     assert_eq!(pf.compile().unwrap().len(), pf.laws().len());
 
-    // kit-eqsat pack "attention" — the full SDPA_EXPAND_RULES opt-in pack
+    // kit-eqsat pack "attention" — the `ATTENTION_RULES` +
+    // `SDPA_EXPAND_RULES` opt-in pack (Python `ATTENTION` ruleset
+    // order): the 36 portable `laws/attention.py` members whose
+    // procedural `check` hooks translate to `uniform`/`scalar`/
+    // `dim-eq-const`/`bcast-into`/`mm-shape-ok`/`rank`/`dim-compat`
+    // conds (`rope_cat_compose` declined — its half-split guard
+    // needs attr-arithmetic vs shape-extent comparisons the
+    // vocabulary cannot form), ahead of the full SDPA_EXPAND_RULES
     // (stage 4 ported the `dim` dspec channel the scale-free
     // key-sets mint `1/√(q[-1])` through).
     let att = LawSet::from_json(pack("attention")).unwrap();
     assert_eq!(att.laws(), builtin::attention().as_slice());
+    assert_eq!(att.laws().len(), 44);
     assert_eq!(att.compile().unwrap().len(), att.laws().len());
 
     // kit-eqsat pack "scan" — the opt-in SCAN_LAWS + SCAN_DIAG_LAWS
