@@ -609,7 +609,7 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     // `shaped`/`shape-eq`/`bcast` grid guard is declarative data.
     let pa = LawSet::from_json(pack("prior_art")).unwrap();
     assert_eq!(pa.laws(), builtin::prior_art().as_slice());
-    assert_eq!(pa.laws().len(), 56);
+    assert_eq!(pa.laws().len(), 89);
     // Every guarded record compiles — the corpus exercises the whole
     // stage-1 vocabulary end to end.
     assert_eq!(pa.compile().unwrap().len(), pa.laws().len());

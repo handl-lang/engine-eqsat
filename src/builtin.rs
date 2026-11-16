@@ -1407,6 +1407,880 @@ pub fn mul_const_div() -> Law {
 }
 
 // ---------------------------------------------------------------------------
+//  prior_art §2 head — `mul_unsq_rev` (the §1 index-view tail) and the
+//  no-op elimination block.  The declarative `cond=` guards port
+//  verbatim; the procedural `check=` hooks are re-authored as `cond`
+//  trees over the ported vocabulary (`mod`/`len`/`shape` exprs,
+//  `unique`/`sum`/`posmap` sequence reads, `attr-is` null arms) — the
+//  same re-authoring posture as the layout pack.  `squeeze_all_noop`
+//  and `expand_noop` stay Python-side: their all-dims guards need a
+//  forall the vocabulary cannot form.
+// ---------------------------------------------------------------------------
+
+/// `mul_unsq_rev`: `unsq(u·v, d) = unsq(u, d)·unsq(v, d)` — the
+/// broadcast-sink direction, guarded to the `flat-map-unsq` region
+/// AND `UD` literal-in-range for both operand unsqs.
+///
+/// Python: `priorart.py` `MUL_UNSQ_REV`, cond verbatim, tags
+/// `prior_art`+`categorical`.
+pub fn mul_unsq_rev() -> Law {
+    let unsq = |t: Pat| {
+        Pat::Op(
+            OpPat::new("unsqueeze")
+                .arg(t)
+                .attrs_fields(afields(vec![("dim", af_bind("UD"))])),
+        )
+    };
+    Law::new(
+        "mul_unsq_rev",
+        Pat::Op(
+            OpPat::new("unsqueeze")
+                .arg(Pat::op("mul", vec![Pat::var("u"), Pat::var("v")]))
+                .attrs_fields(afields(vec![("dim", af_bind("UD"))])),
+        ),
+        Pat::op("mul", vec![unsq(Pat::var("u")), unsq(Pat::var("v"))]),
+    )
+    .with_law(
+        "unsq(u·v, d) = unsq(u, d)·unsq(v, d) — the size-1-axis insert distributes over elementwise mul: XLA's broadcast-sink direction, guarded to the flat-map-unsq region AND UD literal-in-range for both operand unsqs (the implicit-broadcast soundness envelope).",
+    )
+    .with_cond(json!([
+        "and",
+        ["flat-map-unsq", "u", "UD", "v", ["unsq-out", "v", "UD"]],
+        ["attr-cmp", "UD", ">=", ["neg", ["add", ["len", ["shape", "u"]], 1]]],
+        ["attr-cmp", "UD", "<=", ["len", ["shape", "u"]]],
+        ["attr-cmp", "UD", ">=", ["neg", ["add", ["len", ["shape", "v"]], 1]]],
+        ["attr-cmp", "UD", "<=", ["len", ["shape", "v"]]]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("categorical")
+}
+
+/// The value-identity relayout strips — `op(u) → u` for the ops the
+/// IR treats as materialisation/relabel boundaries, not value
+/// changes (`contiguous_id`/`clone_id`/`alias_id`/`detach_id`/
+/// `detach_inplace_id`). Unguarded, tags `prior_art`+`simplification`.
+fn strip_id(name: &str, op: &str, law: &str) -> Law {
+    Law::new(name, Pat::op(op, vec![Pat::var("u")]), Pat::var("u"))
+        .with_law(law)
+        .with_tag("prior_art")
+        .with_tag("simplification")
+}
+
+/// `contiguous_id`: `contiguous(u) → u`.
+///
+/// Python: `priorart.py` `CONTIGUOUS_ID`.
+pub fn contiguous_id() -> Law {
+    strip_id(
+        "contiguous_id",
+        "contiguous",
+        "contiguous(x) is a value-identity relayout — the IR's semantics is value-level, so the strip is exact.",
+    )
+}
+
+/// `clone_id`: `clone(u) → u`.
+///
+/// Python: `priorart.py` `CLONE_ID`.
+pub fn clone_id() -> Law {
+    strip_id(
+        "clone_id",
+        "clone",
+        "clone(x) preserves values exactly — a materialization, not a value change.",
+    )
+}
+
+/// `alias_id`: `alias(u) → u`.
+///
+/// Python: `priorart.py` `ALIAS_ID`.
+pub fn alias_id() -> Law {
+    strip_id(
+        "alias_id",
+        "alias",
+        "alias(x) is the identity leaf-relabel.",
+    )
+}
+
+/// `detach_id`: `detach(u) → u`.
+///
+/// Python: `priorart.py` `DETACH_ID`.
+pub fn detach_id() -> Law {
+    strip_id(
+        "detach_id",
+        "detach",
+        "detach(x) is the value identity — the autograd boundary the IR does not model (Inductor strips it in inference).",
+    )
+}
+
+/// `detach_inplace_id`: `detach_(u) → u`.
+///
+/// Python: `priorart.py` `DETACH_INPLACE_ID`.
+pub fn detach_inplace_id() -> Law {
+    strip_id(
+        "detach_inplace_id",
+        "detach_",
+        "detach_(x) — the in-place spelling of the same value identity.",
+    )
+}
+
+/// `CAST_IDEM_RULES` — `float`/`half`/`double`/`bfloat16` idempotence:
+/// `op(op(u)) → op(u)`.
+fn cast_idem_rules() -> Vec<Law> {
+    ["float", "half", "double", "bfloat16"]
+        .into_iter()
+        .map(|op| {
+            Law::new(
+                format!("{op}_idem"),
+                Pat::op(op, vec![Pat::op(op, vec![Pat::var("u")])]),
+                Pat::op(op, vec![Pat::var("u")]),
+            )
+            .with_law(format!(
+                "{op}({op}(x)) = {op}(x) — dtype casts are idempotent."
+            ))
+            .with_tag("prior_art")
+            .with_tag("simplification")
+        })
+        .collect()
+}
+
+/// `unsqueeze_squeeze`: `squeeze(unsqueeze(u, UD), SD) → u` when the
+/// squeezed axis IS the inserted one — `UD % (rank(u)+1) ==
+/// SD % (rank(u)+1)`, re-authored from `_check_unsq_sq` as a `mod`
+/// expr pair over `len(shape(u))+1`.
+///
+/// Python: `priorart.py` `UNSQUEEZE_SQUEEZE`, check `_check_unsq_sq`,
+/// tags `prior_art`+`simplification`.
+pub fn unsqueeze_squeeze() -> Law {
+    Law::new(
+        "unsqueeze_squeeze",
+        Pat::Op(
+            OpPat::new("squeeze")
+                .arg(Pat::Op(
+                    OpPat::new("unsqueeze")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![("dim", af_bind("UD"))])),
+                ))
+                .attrs_fields(afields(vec![("dim", af_bind("SD"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "squeeze(unsqueeze(u, d), d) = u — the insert/remove pair cancels on the same normalized axis.",
+    )
+    .with_cond(json!([
+        "and",
+        ["attr-type", "UD", "int"],
+        ["attr-type", "SD", "int"],
+        [
+            "attr-cmp",
+            ["mod", ["attr", "UD"], ["add", ["len", ["shape", "u"]], 1]],
+            "==",
+            ["mod", ["attr", "SD"], ["add", ["len", ["shape", "u"]], 1]]
+        ]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `squeeze_unsqueeze`: `unsqueeze(squeeze(u, D), D) → u` when
+/// `u[D] == 1` — the remove/insert pair cancels on a size-1 axis
+/// only. `_check_sq_unsq` re-authored: `attr-cmp-dim` reads the
+/// bound dim attr against `shape(u)` (its `_dim_at` range check is
+/// the in-range half of the hook's `s[d % len(s)]` read — an
+/// out-of-range spelled dim is not a valid squeeze axis anyway).
+///
+/// Python: `priorart.py` `SQUEEZE_UNSQUEEZE`, check `_check_sq_unsq`,
+/// tags `prior_art`+`simplification`.
+pub fn squeeze_unsqueeze() -> Law {
+    Law::new(
+        "squeeze_unsqueeze",
+        Pat::Op(
+            OpPat::new("unsqueeze")
+                .arg(Pat::Op(
+                    OpPat::new("squeeze")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+                ))
+                .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "unsqueeze(squeeze(u, d), d) = u when u[d] == 1 — the remove/insert pair cancels on a size-1 axis only.",
+    )
+    .with_cond(json!([
+        "and",
+        ["attr-type", "D", "int"],
+        ["attr-cmp-dim", 1, "==", "u", "D"]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `_COND_AXIS` — the nonneg in-range axis spelling shared by the
+/// slice no-op pair (Python `priorart.py` `_COND_AXIS`).
+fn cond_axis() -> Value {
+    json!([
+        "and",
+        ["attr-type", "D", "int"],
+        ["attr-cmp", "D", ">=", 0],
+        ["attr-cmp", ["len", ["shape", "u"]], ">", ["attr", "D"]]
+    ])
+}
+
+/// `squeeze_noop`: `squeeze(u, D) → u` when `u[D] != 1`.
+///
+/// Python: `priorart.py` `SQUEEZE_NOOP`, cond verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn squeeze_noop() -> Law {
+    Law::new(
+        "squeeze_noop",
+        Pat::Op(
+            OpPat::new("squeeze")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "squeeze(u, d) on a non-1 axis removes nothing — a no-op the exporter's belt-and-braces squeezes leave behind.",
+    )
+    .with_cond(json!(["attr-cmp-dim", 1, "!=", "u", "D"]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `reshape_noop`: `reshape(u, shape(u)) → u`.
+///
+/// Python: `priorart.py` `RESHAPE_NOOP`, cond verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn reshape_noop() -> Law {
+    Law::new(
+        "reshape_noop",
+        Pat::Op(
+            OpPat::new("reshape")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("shape", af_bind("S"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "reshape(u, shape(u)) = u — the no-op reshape strip (Inductor view-chain simplification).",
+    )
+    .with_cond(json!(["attr-cmp", "S", "==", ["shape", "u"]]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `reshape_reshape`: `reshape(reshape(u, S0), S1) → reshape(u, S1)`.
+///
+/// Python: `priorart.py` `RESHAPE_RESHAPE`, tags
+/// `prior_art`+`simplification`.
+pub fn reshape_reshape() -> Law {
+    Law::new(
+        "reshape_reshape",
+        Pat::Op(
+            OpPat::new("reshape")
+                .arg(Pat::Op(
+                    OpPat::new("reshape")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![("shape", af_bind("S0"))])),
+                ))
+                .attrs_fields(afields(vec![("shape", af_bind("S1"))])),
+        ),
+        Pat::Op(
+            OpPat::new("reshape")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("shape", af_bind("S1"))])),
+        ),
+    )
+    .with_law(
+        "reshape(reshape(u, s0), s1) = reshape(u, s1) — view composition keeps only the final target.",
+    )
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `broadcast_to_noop`: `broadcast_to(u, shape(u)) → u`.
+///
+/// Python: `priorart.py` `BROADCAST_TO_NOOP`, cond verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn broadcast_to_noop() -> Law {
+    Law::new(
+        "broadcast_to_noop",
+        Pat::Op(
+            OpPat::new("broadcast_to")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("shape", af_bind("S"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("broadcast_to(u, shape(u)) = u — the same no-op for the materializing spelling.")
+    .with_cond(json!(["attr-cmp", "S", "==", ["shape", "u"]]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `broadcast_to_expand`: `broadcast_to(u, S) → expand(u, S)` —
+/// expansive, the strict spelling as a special case of the view.
+///
+/// Python: `priorart.py` `BROADCAST_TO_EXPAND`, tags
+/// `prior_art`+`expansive`.
+pub fn broadcast_to_expand() -> Law {
+    Law::new(
+        "broadcast_to_expand",
+        Pat::Op(
+            OpPat::new("broadcast_to")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("shape", af_bind("S"))])),
+        ),
+        Pat::Op(
+            OpPat::new("expand")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("shape", af_bind("S"))])),
+        ),
+    )
+    .with_law(
+        "broadcast_to(u, s) = expand(u, s) — the strict spelling is a special case of the view.",
+    )
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `slice_noop`: `slice(u, D, 0, E) → u` when `E >= u[D]` — the
+/// full-cover slice strip.
+///
+/// Python: `priorart.py` `SLICE_NOOP`, cond verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn slice_noop() -> Law {
+    let mut cond = cond_axis();
+    cond.as_array_mut()
+        .expect("cond_axis is an and-node")
+        .push(json!(["attr-cmp-dim", "E", ">=", "u", "D"]));
+    Law::new(
+        "slice_noop",
+        Pat::Op(
+            OpPat::new("slice")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("dim", af_bind("D")),
+                    ("start", af_lit(json!(0))),
+                    ("end", af_bind("E")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "slice(u, d, 0, e) = u when e >= u[d] — the full-cover slice strip (the export's ``x[..., :e]`` no-op).",
+    )
+    .with_cond(cond)
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `slice_noop_nostart`: the start-elided `x[..., :e]` spelling.
+///
+/// Python: `priorart.py` `SLICE_NOOP_NOSTART`, cond verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn slice_noop_nostart() -> Law {
+    let mut cond = cond_axis();
+    cond.as_array_mut()
+        .expect("cond_axis is an and-node")
+        .push(json!(["attr-cmp-dim", "E", ">=", "u", "D"]));
+    Law::new(
+        "slice_noop_nostart",
+        Pat::Op(
+            OpPat::new("slice")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("dim", af_bind("D")), ("end", af_bind("E"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("The start-elided full-cover slice — ``x[..., :e]`` with e >= u[d].")
+    .with_cond(cond)
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `index_select_id`: `index_select(u, D, range(u[D])) → u` — the
+/// identity gather.
+///
+/// Python: `priorart.py` `INDEX_SELECT_ID`, cond verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn index_select_id() -> Law {
+    Law::new(
+        "index_select_id",
+        Pat::Op(
+            OpPat::new("index_select")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("dim", af_bind("D")),
+                    ("index", af_bind("I")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("index_select(u, d, range(u[d])) = u — the identity gather.")
+    .with_cond(json!(["attr-range", "I", "u", "D"]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `roll_noop`: `roll(u, shifts=0) → u` — `_check_roll_noop`
+/// re-authored. `SH` int spelling is `attr-eq 0`; the sequence
+/// spelling is "at most one distinct value and it sums to 0" —
+/// `len(unique(SH)) <= 1 ∧ sum(unique(SH)) == 0` iff every element
+/// `== 0` (the unique/sum pair is the vocabulary's only elementwise
+/// fold; non-sequence spellings decline inside `unique` exactly like
+/// the hook's `isinstance` gate).
+///
+/// Python: `priorart.py` `ROLL_NOOP`, check `_check_roll_noop`,
+/// tags `prior_art`+`simplification`.
+pub fn roll_noop() -> Law {
+    Law::new(
+        "roll_noop",
+        Pat::Op(
+            OpPat::new("roll")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("shifts", af_bind("SH")),
+                    ("dims", af_bind("DM")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("roll(u, shifts=0) = u — a zero shift on every axis.")
+    .with_cond(json!([
+        "or",
+        ["and", ["attr-type", "SH", "int"], ["attr-eq", "SH", 0]],
+        [
+            "and",
+            ["attr-cmp", ["len", ["unique", ["attr", "SH"]]], "<=", 1],
+            ["attr-cmp", ["sum", ["unique", ["attr", "SH"]]], "==", 0]
+        ]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `pad_noop`: `pad(u, zeros) → u` — `_check_pad_noop` re-authored
+/// as the same unique/sum all-zero fold (the empty pad reads
+/// `unique → ()`, `sum → 0`, matching `all(())`).
+///
+/// Python: `priorart.py` `PAD_NOOP`, check `_check_pad_noop`,
+/// tags `prior_art`+`simplification`.
+pub fn pad_noop() -> Law {
+    Law::new(
+        "pad_noop",
+        Pat::Op(
+            OpPat::new("pad")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("pad", af_bind("P"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("pad(u, zeros) = u — an all-zero pad pad is a no-op.")
+    .with_cond(json!([
+        "and",
+        ["attr-cmp", ["len", ["unique", ["attr", "P"]]], "<=", 1],
+        ["attr-cmp", ["sum", ["unique", ["attr", "P"]]], "==", 0]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `repeat_noop`: `repeat(u, ones) → u` — `_check_repeat_noop`
+/// re-authored: `len(S) == rank(shape(u))` (the full-cover half —
+/// repeat left-pads the rank) AND every factor `== 1`, the latter as
+/// "empty, or at most one distinct value summing to 1".
+///
+/// Python: `priorart.py` `REPEAT_NOOP`, check `_check_repeat_noop`,
+/// tags `prior_art`+`simplification`.
+pub fn repeat_noop() -> Law {
+    Law::new(
+        "repeat_noop",
+        Pat::Op(
+            OpPat::new("repeat")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("shape", af_bind("S"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("repeat(u, ones) = u — tiling by 1 on every axis.")
+    .with_cond(json!([
+        "and",
+        [
+            "attr-cmp",
+            ["len", ["attr", "S"]],
+            "==",
+            ["len", ["shape", "u"]]
+        ],
+        [
+            "or",
+            ["attr-cmp", ["len", ["unique", ["attr", "S"]]], "==", 0],
+            [
+                "and",
+                ["attr-cmp", ["len", ["unique", ["attr", "S"]]], "==", 1],
+                ["attr-cmp", ["sum", ["unique", ["attr", "S"]]], "==", 1]
+            ]
+        ]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `permute_noop`: `permute(u, identity) → u` — `_check_permute_id`
+/// re-authored. `P == range(rank(u))` has no range expr, so the
+/// identity is pinned three ways: `len(P) == rank`, all elements
+/// distinct (`len(unique(P)) == len(P)` — kills `(0,0)`-style
+/// non-permutations the `posmap` fixed-point alone would admit),
+/// and `posmap(P, P) == P` — for a distinct sequence the posmap
+/// yields the first-occurrence positions, so equality with `P`
+/// forces `P[i] == i` elementwise.
+///
+/// Python: `priorart.py` `PERMUTE_NOOP`, check `_check_permute_id`,
+/// tags `prior_art`+`simplification`.
+pub fn permute_noop() -> Law {
+    Law::new(
+        "permute_noop",
+        Pat::Op(
+            OpPat::new("permute")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("dims", af_bind("P"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("permute(u, identity) = u.")
+    .with_cond(json!([
+        "and",
+        [
+            "attr-cmp",
+            ["len", ["attr", "P"]],
+            "==",
+            ["len", ["shape", "u"]]
+        ],
+        [
+            "attr-cmp",
+            ["len", ["unique", ["attr", "P"]]],
+            "==",
+            ["len", ["attr", "P"]]
+        ],
+        [
+            "attr-cmp",
+            ["posmap", ["attr", "P"], ["attr", "P"]],
+            "==",
+            ["attr", "P"]
+        ]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `permute_compose`: `permute(permute(u,P),Q) → permute(u,C)` with
+/// `C = gather(P, Q)` — permutation composition minted as the
+/// index-of-index form (`C[j] = P[Q[j]]`).
+///
+/// Python: `priorart.py` `PERMUTE_COMPOSE`, cond + dspec verbatim,
+/// tags `prior_art`+`simplification`.
+pub fn permute_compose() -> Law {
+    Law::new(
+        "permute_compose",
+        Pat::Op(
+            OpPat::new("permute")
+                .arg(Pat::Op(
+                    OpPat::new("permute")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![("dims", af_bind("P"))])),
+                ))
+                .attrs_fields(afields(vec![("dims", af_bind("Q"))])),
+        ),
+        Pat::Op(
+            OpPat::new("permute")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("dims", af_bind("C"))])),
+        ),
+    )
+    .with_law(
+        "permute(permute(u,P),Q) = permute(u, P∘Q) — permutation composition, minted as gather(P, Q).",
+    )
+    .with_cond(json!([
+        "and",
+        ["attr-ints", "P"],
+        ["attr-ints", "Q"],
+        ["attr-cmp", ["len", ["attr", "P"]], "==", ["len", ["shape", "u"]]],
+        ["attr-cmp", ["len", ["attr", "Q"]], "==", ["len", ["attr", "P"]]]
+    ]))
+    .with_dspec(json!({"C": ["gather", ["attr", "P"], ["attr", "Q"]]}))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `movedim_involution`: `movedim(movedim(u,S,D),D,S) → u` — the
+/// attr reuse across the two spellings pins source/destination
+/// swapped; the cond keeps the int spelling the eval binding
+/// iterates.
+///
+/// Python: `priorart.py` `MOVEDIM_INVOLUTION`, cond verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn movedim_involution() -> Law {
+    Law::new(
+        "movedim_involution",
+        Pat::Op(
+            OpPat::new("movedim")
+                .arg(Pat::Op(
+                    OpPat::new("movedim")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![
+                            ("source", af_bind("S")),
+                            ("destination", af_bind("D")),
+                        ])),
+                ))
+                .attrs_fields(afields(vec![
+                    ("source", af_bind("D")),
+                    ("destination", af_bind("S")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("movedim(movedim(u,s,d),d,s) = u — moving an axis forth and back is the identity.")
+    .with_cond(json!([
+        "and",
+        ["attr-type", "S", "int"],
+        ["attr-type", "D", "int"]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `flatten_noop`: `flatten(u, SD, ED) → u` when `SD % rank ==
+/// ED % rank` — `_check_flatten_noop` re-authored. The hook's
+/// `ed = -1 if ed is None` arm is the `attr-is ED null` branch (a
+/// bound `null` `end_dim` reads as the -1 default; the fields
+/// keyset still requires the attr present, matching `Op.make`'s
+/// exact-keyset).
+///
+/// Python: `priorart.py` `FLATTEN_NOOP`, check `_check_flatten_noop`,
+/// tags `prior_art`+`simplification`.
+pub fn flatten_noop() -> Law {
+    Law::new(
+        "flatten_noop",
+        Pat::Op(
+            OpPat::new("flatten")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("start_dim", af_bind("SD")),
+                    ("end_dim", af_bind("ED")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("flatten(u, i, i) = u — a one-axis merge is a no-op.")
+    .with_cond(json!([
+        "and",
+        ["attr-type", "SD", "int"],
+        [
+            "attr-cmp",
+            ["mod", ["attr", "SD"], ["len", ["shape", "u"]]],
+            "==",
+            [
+                "mod",
+                ["if", ["attr-is", "ED", null], -1, ["attr", "ED"]],
+                ["len", ["shape", "u"]]
+            ]
+        ]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `unflatten_noop`: `unflatten(u, D, (u[D],)) → u` — a singleton
+/// split restores the same axis.
+///
+/// Python: `priorart.py` `UNFLATTEN_NOOP`, cond verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn unflatten_noop() -> Law {
+    Law::new(
+        "unflatten_noop",
+        Pat::Op(
+            OpPat::new("unflatten")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("dim", af_bind("D")),
+                    ("sizes", af_bind("SZ")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("unflatten(u, d, (u[d],)) = u — a singleton split restores the same axis.")
+    .with_cond(json!([
+        "and",
+        ["attr-len", "SZ", "==", 1],
+        [
+            "attr-cmp",
+            ["nth", ["attr", "SZ"], 0],
+            "==",
+            ["nth", ["shape", "u"], ["attr", "D"]]
+        ]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `split_single`: `split(u, (u[D],), D, 0) → u` — a one-section
+/// split is the whole tensor.
+///
+/// Python: `priorart.py` `SPLIT_SINGLE`, cond verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn split_single() -> Law {
+    Law::new(
+        "split_single",
+        Pat::Op(
+            OpPat::new("split")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("sizes", af_bind("SZ")),
+                    ("dim", af_bind("D")),
+                    ("index", af_bind("I")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "split(u, (u[d],), d, 0) = u — a one-section split is the whole tensor (the chunk_single sibling).",
+    )
+    .with_cond(json!([
+        "and",
+        ["attr-eq", "I", 0],
+        ["attr-len", "SZ", "==", 1],
+        [
+            "attr-cmp",
+            ["nth", ["attr", "SZ"], 0],
+            "==",
+            ["nth", ["shape", "u"], ["attr", "D"]]
+        ]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `flip_involution`: `flip(flip(u, D1), D2) → u` — `_check_flip_inv`
+/// re-authored: the dims attrs must be int tuples and equal
+/// (`attr-ints` + `attr-eq-attr`; the int-dims gate is the hook's
+/// eval-binding note — an int `dims` can't spell flip).
+///
+/// Python: `priorart.py` `FLIP_INVOLUTION`, check `_check_flip_inv`,
+/// tags `prior_art`+`simplification`.
+pub fn flip_involution() -> Law {
+    Law::new(
+        "flip_involution",
+        Pat::Op(
+            OpPat::new("flip")
+                .arg(Pat::Op(
+                    OpPat::new("flip")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![("dims", af_bind("D1"))])),
+                ))
+                .attrs_fields(afields(vec![("dims", af_bind("D2"))])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("flip(flip(u, d), d) = u — reversing the same axes twice.")
+    .with_cond(json!([
+        "and",
+        ["attr-ints", "D1"],
+        ["attr-eq-attr", "D1", "D2"]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `tril_idem`: `tril(tril(u, G), G) → tril(u, G)` — the repeated
+/// `diagonal` bind pins the same bound.
+///
+/// Python: `priorart.py` `TRIL_IDEM`, tags `prior_art`+`simplification`.
+pub fn tril_idem() -> Law {
+    Law::new(
+        "tril_idem",
+        Pat::Op(
+            OpPat::new("tril")
+                .arg(Pat::Op(
+                    OpPat::new("tril")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![("diagonal", af_bind("G"))])),
+                ))
+                .attrs_fields(afields(vec![("diagonal", af_bind("G"))])),
+        ),
+        Pat::Op(
+            OpPat::new("tril")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("diagonal", af_bind("G"))])),
+        ),
+    )
+    .with_law("tril(tril(u, g), g) = tril(u, g) — masking is idempotent.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `triu_idem`: `triu(triu(u, G), G) → triu(u, G)`.
+///
+/// Python: `priorart.py` `TRIU_IDEM`, tags `prior_art`+`simplification`.
+pub fn triu_idem() -> Law {
+    Law::new(
+        "triu_idem",
+        Pat::Op(
+            OpPat::new("triu")
+                .arg(Pat::Op(
+                    OpPat::new("triu")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![("diagonal", af_bind("G"))])),
+                ))
+                .attrs_fields(afields(vec![("diagonal", af_bind("G"))])),
+        ),
+        Pat::Op(
+            OpPat::new("triu")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("diagonal", af_bind("G"))])),
+        ),
+    )
+    .with_law("triu(triu(u, g), g) = triu(u, g).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `clamp_idem`: `clamp(clamp(u, LO, HI), LO, HI) → clamp(u, LO, HI)`.
+///
+/// Python: `priorart.py` `CLAMP_IDEM`, tags `prior_art`+`simplification`.
+pub fn clamp_idem() -> Law {
+    Law::new(
+        "clamp_idem",
+        Pat::Op(
+            OpPat::new("clamp")
+                .arg(Pat::Op(
+                    OpPat::new("clamp")
+                        .arg(Pat::var("u"))
+                        .attrs_fields(afields(vec![
+                            ("min", af_bind("LO")),
+                            ("max", af_bind("HI")),
+                        ])),
+                ))
+                .attrs_fields(afields(vec![
+                    ("min", af_bind("LO")),
+                    ("max", af_bind("HI")),
+                ])),
+        ),
+        Pat::Op(
+            OpPat::new("clamp")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("min", af_bind("LO")),
+                    ("max", af_bind("HI")),
+                ])),
+        ),
+    )
+    .with_law("clamp(clamp(u,l,h),l,h) = clamp(u,l,h) — same-bound nesting is a no-op.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+// ---------------------------------------------------------------------------
 //  prior_art §2 tail — pointwise idempotence/parity, the scalar/Const
 //  remainder, and the spelled-unit folds.  Every member is unguarded or
 //  rides the ported `shaped`/`shape-eq`/`bcast` vocabulary verbatim.
@@ -5775,7 +6649,18 @@ pub fn attention() -> Vec<Law> {
 }
 
 /// The portable slice of `PRIOR_ART_RULES` (Python order):
-/// the activation folds (`sigmoid_fold`, `sigmoid_fold_div`,
+/// the §1 index-view tail `mul_unsq_rev` and the §2 no-op
+/// elimination block (`contiguous_id`/`clone_id`/`alias_id`/
+/// `detach_id`/`detach_inplace_id`, the `*_idem` cast family,
+/// the squeeze/unsqueeze/reshape/broadcast/slice/index_select/
+/// roll/pad/repeat/permute/movedim/flatten/unflatten/split/flip/
+/// tril/triu/clamp folds — the procedural `check=` hooks
+/// re-authored as `cond` trees over the ported `mod`/`len`/
+/// `shape`/`unique`/`sum`/`posmap`/`attr-is` vocabulary;
+/// `squeeze_all_noop` and `expand_noop` stay Python-side — the
+/// all-dims forall and the `-1` keep-dim read need expr forms
+/// the vocabulary cannot shape), then the activation folds
+/// (`sigmoid_fold`, `sigmoid_fold_div`,
 /// `tanh_fold`, `hardsigmoid_fold`), the §2 pointwise
 /// idempotence/parity family (`abs_*`, `sqrt_square`,
 /// `rsqrt_square`, `maximum_idem`/`minimum_idem`, the odd/even
@@ -5797,6 +6682,40 @@ pub fn attention() -> Vec<Law> {
 /// Python bank's opt-in `prior_art` preset.
 pub fn prior_art() -> Vec<Law> {
     let mut laws = vec![
+        // -- §1 index-view tail + §2 no-op elimination
+        mul_unsq_rev(),
+        contiguous_id(),
+        clone_id(),
+        alias_id(),
+        detach_id(),
+        detach_inplace_id(),
+    ];
+    laws.extend(cast_idem_rules());
+    laws.extend([
+        unsqueeze_squeeze(),
+        squeeze_unsqueeze(),
+        squeeze_noop(),
+        reshape_noop(),
+        reshape_reshape(),
+        broadcast_to_noop(),
+        broadcast_to_expand(),
+        slice_noop(),
+        slice_noop_nostart(),
+        index_select_id(),
+        roll_noop(),
+        pad_noop(),
+        repeat_noop(),
+        permute_noop(),
+        permute_compose(),
+        movedim_involution(),
+        flatten_noop(),
+        unflatten_noop(),
+        split_single(),
+        flip_involution(),
+        tril_idem(),
+        triu_idem(),
+        clamp_idem(),
+        // -- activation folds
         sigmoid_fold(),
         sigmoid_fold_div(),
         tanh_fold(),
@@ -5838,7 +6757,7 @@ pub fn prior_art() -> Vec<Law> {
         mul2_to_add(),
         mul_neg1(),
         neg_const(),
-    ];
+    ]);
     laws.extend(mul_const_assoc_rules());
     laws.extend(add_const_assoc_rules());
     laws.extend([
