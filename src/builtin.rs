@@ -2281,6 +2281,631 @@ pub fn clamp_idem() -> Law {
 }
 
 // ---------------------------------------------------------------------------
+//  prior_art §2 middle — the reduction algebra (std/var/norm2/log-softmax)
+//  and the activation decompositions.  `REDUCE_DIM1_RULES` stays
+//  Python-side: `_COND_DIM1`'s singleton-tuple arm reads
+//  `("attr0", "D")` inside `attr-cmp-dim`'s shape-attr position, and
+//  inline derive exprs there are a named `GuardError::Unsupported` —
+//  attr-arithmetic the grammar cannot form.  `mean_expand`/`mean_fold`
+//  stay too: the reduced-extent divisor is a *product* over the bound
+//  dims (no product/fold expr in the dspec algebra) and the fold's
+//  check needs a Const-vs-computed-expr equality no cond forms.
+// ---------------------------------------------------------------------------
+
+/// `std_sqrt_var`: `std(u, d, c, k) → sqrt(var(u, d, c, k))` — the
+/// same dims/correction/keepdim metavariables on both sides.
+///
+/// Python: `priorart.py` `STD_SQRT_VAR`, tags `prior_art`+`simplification`.
+pub fn std_sqrt_var() -> Law {
+    let red = |op: &str| {
+        Pat::Op(OpPat::new(op).arg(Pat::var("u")).attrs_fields(afields(vec![
+            ("dim", af_bind("D")),
+            ("correction", af_bind("C")),
+            ("keepdim", af_bind("K")),
+        ])))
+    };
+    Law::new(
+        "std_sqrt_var",
+        red("std"),
+        Pat::op("sqrt", vec![red("var")]),
+    )
+    .with_law(
+        "std = sqrt(var) — the same dims/correction/keepdim on both sides (XLA's std decomposition).",
+    )
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `var_square_std`: `var(u, d, c, k) → square(std(u, d, c, k))` — the
+/// reverse spelling.
+///
+/// Python: `priorart.py` `VAR_SQUARE_STD`, tags
+/// `prior_art`+`expansive`, derivation `std_sqrt_var`.
+pub fn var_square_std() -> Law {
+    let red = |op: &str| {
+        Pat::Op(OpPat::new(op).arg(Pat::var("u")).attrs_fields(afields(vec![
+            ("dim", af_bind("D")),
+            ("correction", af_bind("C")),
+            ("keepdim", af_bind("K")),
+        ])))
+    };
+    Law::new(
+        "var_square_std",
+        red("var"),
+        Pat::op("square", vec![red("std")]),
+    )
+    .with_law("var = std² — the reverse spelling.")
+    .with_derivation("std_sqrt_var")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `std_sqrt_var_bare`: `std(u) → sqrt(var(u))` — the whole-tensor
+/// spelling, no attrs.
+///
+/// Python: `priorart.py` `STD_SQRT_VAR_BARE`, tags
+/// `prior_art`+`simplification`.
+pub fn std_sqrt_var_bare() -> Law {
+    Law::new(
+        "std_sqrt_var_bare",
+        Pat::op("std", vec![Pat::var("u")]),
+        Pat::op("sqrt", vec![Pat::op("var", vec![Pat::var("u")])]),
+    )
+    .with_law("The whole-tensor spelling — std() = sqrt(var()).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `var_square_std_bare`: `var(u) → square(std(u))` — the
+/// whole-tensor var = std².
+///
+/// Python: `priorart.py` `VAR_SQUARE_STD_BARE`, tags
+/// `prior_art`+`expansive`, derivation `std_sqrt_var_bare`.
+pub fn var_square_std_bare() -> Law {
+    Law::new(
+        "var_square_std_bare",
+        Pat::op("var", vec![Pat::var("u")]),
+        Pat::op("square", vec![Pat::op("std", vec![Pat::var("u")])]),
+    )
+    .with_law("The whole-tensor var = std².")
+    .with_derivation("std_sqrt_var_bare")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `norm2_expand`: `linalg_vector_norm(u, ord=2, d, k) →
+/// sqrt(sum(square(u), d, k))` — the L2 norm's spelled work; `ord`
+/// is a literal-2 pin, `dim`/`keepdim` share metavariables across the
+/// pair.
+///
+/// Python: `priorart.py` `NORM2_EXPAND`, tags `prior_art`+`expansive`.
+pub fn norm2_expand() -> Law {
+    Law::new(
+        "norm2_expand",
+        Pat::Op(
+            OpPat::new("linalg_vector_norm")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("ord", af_lit(json!(2))),
+                    ("dim", af_bind("D")),
+                    ("keepdim", af_bind("K")),
+                ])),
+        ),
+        Pat::op(
+            "sqrt",
+            vec![Pat::Op(
+                OpPat::new("sum")
+                    .arg(Pat::op("square", vec![Pat::var("u")]))
+                    .attrs_fields(afields(vec![
+                        ("dim", af_bind("D")),
+                        ("keepdim", af_bind("K")),
+                    ])),
+            )],
+        ),
+    )
+    .with_law("‖u‖₂ = sqrt(Σ u²) — the L2 norm's spelled work (XLA linalg decomposition).")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `norm2_fold`: `sqrt(sum(square(u), d, k)) → linalg_vector_norm(u,
+/// ord=2, d, k)` — the spelled work folds to the L2 kernel.
+///
+/// Python: `priorart.py` `NORM2_FOLD`, tags `prior_art`+`simplification`,
+/// derivation `norm2_expand`.
+pub fn norm2_fold() -> Law {
+    Law::new(
+        "norm2_fold",
+        Pat::op(
+            "sqrt",
+            vec![Pat::Op(
+                OpPat::new("sum")
+                    .arg(Pat::op("square", vec![Pat::var("u")]))
+                    .attrs_fields(afields(vec![
+                        ("dim", af_bind("D")),
+                        ("keepdim", af_bind("K")),
+                    ])),
+            )],
+        ),
+        Pat::Op(
+            OpPat::new("linalg_vector_norm")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("ord", af_lit(json!(2))),
+                    ("dim", af_bind("D")),
+                    ("keepdim", af_bind("K")),
+                ])),
+        ),
+    )
+    .with_law("sqrt(Σ u²) folds to the L2 kernel.")
+    .with_derivation("norm2_expand")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `log_softmax_fold`: `log(softmax(u, d)) → log_softmax(u, d)` — the
+/// fused log-softmax fold.
+///
+/// Python: `priorart.py` `LOG_SOFTMAX_FOLD`, tags
+/// `prior_art`+`simplification`.
+pub fn log_softmax_fold() -> Law {
+    let sm = |op: &str| {
+        Pat::Op(
+            OpPat::new(op)
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+        )
+    };
+    Law::new(
+        "log_softmax_fold",
+        Pat::op("log", vec![sm("softmax")]),
+        sm("log_softmax"),
+    )
+    .with_law(
+        "log(softmax(u, d)) = log_softmax(u, d) — the fused log-softmax fold (softcap/logprob heads).",
+    )
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `log_softmax_expand`: `exp(log_softmax(u, d)) → softmax(u, d)` —
+/// the same kernel pair the other way.
+///
+/// Python: `priorart.py` `LOG_SOFTMAX_EXPAND`, tags
+/// `prior_art`+`expansive`, derivation `log_softmax_fold`.
+pub fn log_softmax_expand() -> Law {
+    let sm = |op: &str| {
+        Pat::Op(
+            OpPat::new(op)
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+        )
+    };
+    Law::new(
+        "log_softmax_expand",
+        Pat::op("exp", vec![sm("log_softmax")]),
+        sm("softmax"),
+    )
+    .with_law("exp(log_softmax(u, d)) = softmax(u, d) — the same kernel pair the other way.")
+    .with_derivation("log_softmax_fold")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+// -- activation decompositions (the epilogue spellings) --
+
+/// `sigmoid_expand`: `sigmoid(x) → reciprocal(1 + exp(−x))` — the
+/// definition, expanded so pointwise laws see the interior.
+///
+/// Python: `priorart.py` `SIGMOID_EXPAND`, tags `prior_art`+`expansive`.
+pub fn sigmoid_expand() -> Law {
+    Law::new(
+        "sigmoid_expand",
+        Pat::op("sigmoid", vec![Pat::var("x")]),
+        Pat::op(
+            "reciprocal",
+            vec![Pat::op(
+                "add",
+                vec![
+                    Pat::constant(json!(1)),
+                    Pat::op("exp", vec![Pat::op("neg", vec![Pat::var("x")])]),
+                ],
+            )],
+        ),
+    )
+    .with_law("σ(x) = 1/(1+e⁻ˣ) — the definition, expanded so pointwise laws see the interior (Inductor decomp).")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `tanh_expand`: `tanh(x) → 2σ(2x) − 1` — the sigmoid-based
+/// decomposition.
+///
+/// Python: `priorart.py` `TANH_EXPAND`, tags `prior_art`+`expansive`.
+pub fn tanh_expand() -> Law {
+    Law::new(
+        "tanh_expand",
+        Pat::op("tanh", vec![Pat::var("x")]),
+        Pat::op(
+            "sub",
+            vec![
+                Pat::op(
+                    "mul",
+                    vec![
+                        Pat::constant(json!(2)),
+                        Pat::op(
+                            "sigmoid",
+                            vec![Pat::op("mul", vec![Pat::constant(json!(2)), Pat::var("x")])],
+                        ),
+                    ],
+                ),
+                Pat::constant(json!(1)),
+            ],
+        ),
+    )
+    .with_law(
+        "tanh(x) = 2σ(2x) − 1 — the sigmoid-based decomposition (the TASO/XLA tanh spelling).",
+    )
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `gelu_expand`: `gelu(x) → 0.5x(1 + erf(x/√2))` — the exact erf
+/// definition (the tanh approximation is a different op).
+///
+/// Python: `priorart.py` `GELU_EXPAND`, tags `prior_art`+`expansive`.
+pub fn gelu_expand() -> Law {
+    Law::new(
+        "gelu_expand",
+        Pat::op("gelu", vec![Pat::var("x")]),
+        Pat::op(
+            "mul",
+            vec![
+                Pat::op(
+                    "mul",
+                    vec![Pat::var("x"), Pat::constant(json!(0.5))],
+                ),
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::constant(json!(1)),
+                        Pat::op(
+                            "erf",
+                            vec![Pat::op(
+                                "div",
+                                vec![
+                                    Pat::var("x"),
+                                    // √2 — the Python `Const(1.4142135623730951)`
+                                    // spells the same f64.
+                                    Pat::constant(json!(std::f64::consts::SQRT_2)),
+                                ],
+                            )],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    )
+    .with_law("gelu(x) = 0.5x(1 + erf(x/√2)) — the exact erf definition (aten's default gelu; the tanh approximation is a DIFFERENT op under this bank and is not claimed).")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `mish_expand`: `mish(x) → x·tanh(softplus(x))` — the Mish
+/// definition.
+///
+/// Python: `priorart.py` `MISH_EXPAND`, tags `prior_art`+`expansive`.
+pub fn mish_expand() -> Law {
+    Law::new(
+        "mish_expand",
+        Pat::op("mish", vec![Pat::var("x")]),
+        Pat::op(
+            "mul",
+            vec![
+                Pat::var("x"),
+                Pat::op("tanh", vec![Pat::op("softplus", vec![Pat::var("x")])]),
+            ],
+        ),
+    )
+    .with_law("mish(x) = x·tanh(softplus(x)) — the Mish definition.")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `hardsigmoid_expand`: `hardsigmoid(x) → relu6(x+3)/6` — the
+/// piecewise-linear approximation's definition.
+///
+/// Python: `priorart.py` `HARDSIGMOID_EXPAND`, tags
+/// `prior_art`+`expansive`.
+pub fn hardsigmoid_expand() -> Law {
+    Law::new(
+        "hardsigmoid_expand",
+        Pat::op("hardsigmoid", vec![Pat::var("x")]),
+        Pat::op(
+            "div",
+            vec![
+                Pat::op(
+                    "relu6",
+                    vec![Pat::op("add", vec![Pat::var("x"), Pat::constant(json!(3))])],
+                ),
+                Pat::constant(json!(6)),
+            ],
+        ),
+    )
+    .with_law("hardsigmoid(x) = relu6(x+3)/6 — the piecewise-linear approximation's definition.")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `hardswish_expand`: `hardswish(x) → x·relu6(x+3)/6`.
+///
+/// Python: `priorart.py` `HARDSWISH_EXPAND`, tags
+/// `prior_art`+`expansive`.
+pub fn hardswish_expand() -> Law {
+    Law::new(
+        "hardswish_expand",
+        Pat::op("hardswish", vec![Pat::var("x")]),
+        Pat::op(
+            "mul",
+            vec![
+                Pat::var("x"),
+                Pat::op(
+                    "div",
+                    vec![
+                        Pat::op(
+                            "relu6",
+                            vec![Pat::op("add", vec![Pat::var("x"), Pat::constant(json!(3))])],
+                        ),
+                        Pat::constant(json!(6)),
+                    ],
+                ),
+            ],
+        ),
+    )
+    .with_law("hardswish(x) = x·relu6(x+3)/6.")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `softplus_expand`: `softplus(x) → log1p(eˣ)` at the default
+/// beta=1 — the exported bare spelling.
+///
+/// Python: `priorart.py` `SOFTPLUS_EXPAND`, tags `prior_art`+`expansive`.
+pub fn softplus_expand() -> Law {
+    Law::new(
+        "softplus_expand",
+        Pat::op("softplus", vec![Pat::var("x")]),
+        Pat::op("log1p", vec![Pat::op("exp", vec![Pat::var("x")])]),
+    )
+    .with_law("softplus(x) = log1p(eˣ) at the default beta=1 — the exported bare spelling.")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `softplus_fold`: `log1p(eˣ) → softplus(x)`.
+///
+/// Python: `priorart.py` `SOFTPLUS_FOLD`, tags
+/// `prior_art`+`simplification`, derivation `softplus_expand`.
+pub fn softplus_fold() -> Law {
+    Law::new(
+        "softplus_fold",
+        Pat::op("log1p", vec![Pat::op("exp", vec![Pat::var("x")])]),
+        Pat::op("softplus", vec![Pat::var("x")]),
+    )
+    .with_law("log1p(eˣ) folds to softplus(x).")
+    .with_derivation("softplus_expand")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `elu_expand`: `elu(x) → where(x > 0, x, eˣ−1)` at the default
+/// α=1 — the where-spelled piecewise.
+///
+/// Python: `priorart.py` `ELU_EXPAND`, tags `prior_art`+`expansive`.
+pub fn elu_expand() -> Law {
+    Law::new(
+        "elu_expand",
+        Pat::op("elu", vec![Pat::var("x")]),
+        Pat::op(
+            "where",
+            vec![
+                Pat::op(
+                    "gt",
+                    vec![Pat::var("x"), Pat::constant(json!(0))],
+                ),
+                Pat::var("x"),
+                Pat::op("expm1", vec![Pat::var("x")]),
+            ],
+        ),
+    )
+    .with_law("elu(x) = x·[x>0] + (eˣ−1)·[x≤0] at the default α=1 — the where-spelled piecewise (XLA elu).")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `leaky_relu_expand`: `leaky_relu(x) → max(x, 0.01x)` at the
+/// default slope 0.01.
+///
+/// Python: `priorart.py` `LEAKY_RELU_EXPAND`, tags
+/// `prior_art`+`expansive`.
+pub fn leaky_relu_expand() -> Law {
+    Law::new(
+        "leaky_relu_expand",
+        Pat::op("leaky_relu", vec![Pat::var("x")]),
+        Pat::op(
+            "maximum",
+            vec![
+                Pat::var("x"),
+                Pat::op("mul", vec![Pat::var("x"), Pat::constant(json!(0.01))]),
+            ],
+        ),
+    )
+    .with_law("leaky_relu(x) = max(x, 0.01x) at the default slope 0.01.")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `softsign_expand`: `softsign(x) → x/(|x|+1)` — the bounded
+/// rational map's definition; the fused ATen kernel's denotation
+/// (composite-free — the kernel IS the manual spelling), hence the
+/// `fusion` tag like its norm siblings.
+///
+/// Python: `priorart.py` `SOFTSIGN_EXPAND`, tags `prior_art`+`fusion`.
+pub fn softsign_expand() -> Law {
+    Law::new(
+        "softsign_expand",
+        Pat::op("softsign", vec![Pat::var("x")]),
+        Pat::op(
+            "div",
+            vec![
+                Pat::var("x"),
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::op("abs", vec![Pat::var("x")]),
+                        Pat::constant(json!(1)),
+                    ],
+                ),
+            ],
+        ),
+    )
+    .with_law("softsign(x) = x/(|x|+1) — the bounded rational map's definition, expanded: the fused ATen kernel's denotation (composite-free — the kernel IS the manual spelling).")
+    .with_tag("prior_art")
+    .with_tag("fusion")
+}
+
+/// `relu_fold_max_r`: `max(u, 0) → relu(u)`.
+///
+/// Python: `priorart.py` `RELU_FOLD_MAX_R`, tags
+/// `prior_art`+`simplification`.
+pub fn relu_fold_max_r() -> Law {
+    Law::new(
+        "relu_fold_max_r",
+        Pat::op("maximum", vec![Pat::var("u"), Pat::constant(json!(0))]),
+        Pat::op("relu", vec![Pat::var("u")]),
+    )
+    .with_law("max(u, 0) = relu(u).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `relu_fold_max_l`: `max(0, u) → relu(u)`.
+///
+/// Python: `priorart.py` `RELU_FOLD_MAX_L`, tags
+/// `prior_art`+`simplification`.
+pub fn relu_fold_max_l() -> Law {
+    Law::new(
+        "relu_fold_max_l",
+        Pat::op("maximum", vec![Pat::constant(json!(0)), Pat::var("u")]),
+        Pat::op("relu", vec![Pat::var("u")]),
+    )
+    .with_law("max(0, u) = relu(u).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `relu_fold_clamp`: `clamp_min(u, 0) → relu(u)` — the exported
+/// spelling folds.
+///
+/// Python: `priorart.py` `RELU_FOLD_CLAMP`, tags
+/// `prior_art`+`simplification`.
+pub fn relu_fold_clamp() -> Law {
+    let clamp_min = |u: Pat| {
+        Pat::Op(
+            OpPat::new("clamp_min")
+                .arg(u)
+                .attrs_fields(afields(vec![("min", af_lit(json!(0)))])),
+        )
+    };
+    Law::new(
+        "relu_fold_clamp",
+        clamp_min(Pat::var("u")),
+        Pat::op("relu", vec![Pat::var("u")]),
+    )
+    .with_law("clamp_min(u, 0) = relu(u) — the exported spelling folds.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `relu_expand`: `relu(u) → clamp_min(u, 0)`.
+///
+/// Python: `priorart.py` `RELU_EXPAND`, tags `prior_art`+`expansive`,
+/// derivation `relu_fold_clamp`.
+pub fn relu_expand() -> Law {
+    Law::new(
+        "relu_expand",
+        Pat::op("relu", vec![Pat::var("u")]),
+        Pat::Op(
+            OpPat::new("clamp_min")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![("min", af_lit(json!(0)))])),
+        ),
+    )
+    .with_law("relu(u) = clamp_min(u, 0).")
+    .with_derivation("relu_fold_clamp")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `relu_idem`: `relu(relu(u)) → relu(u)` — the projection is
+/// idempotent.
+///
+/// Python: `priorart.py` `RELU_IDEM`, tags `prior_art`+`simplification`.
+pub fn relu_idem() -> Law {
+    Law::new(
+        "relu_idem",
+        Pat::op("relu", vec![Pat::op("relu", vec![Pat::var("u")])]),
+        Pat::op("relu", vec![Pat::var("u")]),
+    )
+    .with_law("relu(relu(u)) = relu(u) — the projection is idempotent.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `relu6_fold`: `clamp(u, 0, 6) → relu6(u)`.
+///
+/// Python: `priorart.py` `RELU6_FOLD`, tags `prior_art`+`simplification`.
+pub fn relu6_fold() -> Law {
+    let clamp = |u: Pat| {
+        Pat::Op(OpPat::new("clamp").arg(u).attrs_fields(afields(vec![
+            ("min", af_lit(json!(0))),
+            ("max", af_lit(json!(6))),
+        ])))
+    };
+    Law::new(
+        "relu6_fold",
+        clamp(Pat::var("u")),
+        Pat::op("relu6", vec![Pat::var("u")]),
+    )
+    .with_law("clamp(u, 0, 6) = relu6(u).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `relu6_expand`: `relu6(u) → clamp(u, 0, 6)`.
+///
+/// Python: `priorart.py` `RELU6_EXPAND`, tags `prior_art`+`expansive`,
+/// derivation `relu6_fold`.
+pub fn relu6_expand() -> Law {
+    Law::new(
+        "relu6_expand",
+        Pat::op("relu6", vec![Pat::var("u")]),
+        Pat::Op(
+            OpPat::new("clamp")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("min", af_lit(json!(0))),
+                    ("max", af_lit(json!(6))),
+                ])),
+        ),
+    )
+    .with_law("relu6(u) = clamp(u, 0, 6).")
+    .with_derivation("relu6_fold")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+// ---------------------------------------------------------------------------
 //  prior_art §2 tail — pointwise idempotence/parity, the scalar/Const
 //  remainder, and the spelled-unit folds.  Every member is unguarded or
 //  rides the ported `shaped`/`shape-eq`/`bcast` vocabulary verbatim.
@@ -6659,7 +7284,18 @@ pub fn attention() -> Vec<Law> {
 /// `shape`/`unique`/`sum`/`posmap`/`attr-is` vocabulary;
 /// `squeeze_all_noop` and `expand_noop` stay Python-side — the
 /// all-dims forall and the `-1` keep-dim read need expr forms
-/// the vocabulary cannot shape), then the activation folds
+/// the vocabulary cannot shape), then the §2 reduction algebra
+/// (`std_sqrt_var`/`var_square_std` and the bare pair,
+/// `norm2_expand`/`norm2_fold`, `log_softmax_fold`/
+/// `log_softmax_expand` — `reduce_dim1`'s `_COND_DIM1` needs
+/// `attr0` inside `attr-cmp-dim`'s shape-attr position and the
+/// `mean_*` pair needs a product-over-dims derive, all named
+/// refusals) and the §2 activation decompositions
+/// (`sigmoid_expand`, `tanh_expand`, `gelu_expand`, `mish_expand`,
+/// `hardsigmoid_expand`, `hardswish_expand`, `softplus_expand`/
+/// `softplus_fold`, `elu_expand`, `leaky_relu_expand`,
+/// `softsign_expand`, the `relu_*`/`relu6_*` fold-expand-idempotence
+/// family) ahead of the activation folds
 /// (`sigmoid_fold`, `sigmoid_fold_div`,
 /// `tanh_fold`, `hardsigmoid_fold`), the §2 pointwise
 /// idempotence/parity family (`abs_*`, `sqrt_square`,
@@ -6715,11 +7351,39 @@ pub fn prior_art() -> Vec<Law> {
         tril_idem(),
         triu_idem(),
         clamp_idem(),
-        // -- activation folds
+        // -- §2 reduction algebra (REDUCE_DIM1_RULES and the mean
+        //    pair stay Python-side — see the section header)
+        std_sqrt_var(),
+        var_square_std(),
+        std_sqrt_var_bare(),
+        var_square_std_bare(),
+        norm2_expand(),
+        norm2_fold(),
+        log_softmax_fold(),
+        log_softmax_expand(),
+        // -- §2 activation decompositions + folds
+        sigmoid_expand(),
         sigmoid_fold(),
         sigmoid_fold_div(),
+        tanh_expand(),
         tanh_fold(),
+        gelu_expand(),
+        mish_expand(),
+        hardsigmoid_expand(),
         hardsigmoid_fold(),
+        hardswish_expand(),
+        softplus_expand(),
+        softplus_fold(),
+        elu_expand(),
+        leaky_relu_expand(),
+        softsign_expand(),
+        relu_fold_max_r(),
+        relu_fold_max_l(),
+        relu_fold_clamp(),
+        relu_expand(),
+        relu_idem(),
+        relu6_fold(),
+        relu6_expand(),
         // -- §2 pointwise idempotence / parity
         abs_idem(),
         abs_square(),

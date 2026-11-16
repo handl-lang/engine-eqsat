@@ -603,13 +603,15 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
 
     // kit-eqsat pack "prior_art" — the portable PRIOR_ART_RULES
     // slice: const-guarded folds whose `cond`/`dspec` trees are the
-    // `cond.py` spelling carried as record data, the §2 pointwise
+    // `cond.py` spelling carried as record data, the §2 no-op
+    // elimination + reduction-algebra + activation-decomposition
+    // blocks, the §2 pointwise
     // idempotence/parity family, the const-free scalar folds, and
     // the `*_zeroslike_r`/`*_oneslike_r` spelled-unit folds whose
     // `shaped`/`shape-eq`/`bcast` grid guard is declarative data.
     let pa = LawSet::from_json(pack("prior_art")).unwrap();
     assert_eq!(pa.laws(), builtin::prior_art().as_slice());
-    assert_eq!(pa.laws().len(), 89);
+    assert_eq!(pa.laws().len(), 115);
     // Every guarded record compiles — the corpus exercises the whole
     // stage-1 vocabulary end to end.
     assert_eq!(pa.compile().unwrap().len(), pa.laws().len());
