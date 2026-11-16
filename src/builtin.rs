@@ -703,13 +703,18 @@ pub fn right_factor_linear() -> Law {
 /// The head-splitting view shared by [`qkv_fuse`]'s operands:
 /// `transpose(reshape(t, shape=?S), dim0=1, dim1=2)`.
 ///
-/// The `shape` attr payload is bound whole (`attrs_bind("S")`) —
-/// the Python `shape="S"` attr metavariable's equivalent on this
-/// surface (see the module docs for the granularity caveat).
+/// The `shape` attr is spelled per-key (`attrs_fields` with a `shape`
+/// bind) — the Python `shape="S"` attr metavariable's exact-keyset
+/// equivalent on this surface (see the module docs for the
+/// whole-payload caveat).
 fn head_view(t: Pat) -> Pat {
     Pat::Op(
         OpPat::new("transpose")
-            .arg(Pat::Op(OpPat::new("reshape").arg(t).attrs_bind("S")))
+            .arg(Pat::Op(
+                OpPat::new("reshape")
+                    .arg(t)
+                    .attrs_fields(afields(vec![("shape", af_bind("S"))])),
+            ))
             .attrs_lit(json!({"dim0": 1, "dim1": 2})),
     )
 }
@@ -725,11 +730,11 @@ fn head_view(t: Pat) -> Pat {
 /// GEMM into the product space, then three zero-cost chunk
 /// projections.  (Fused QKV.)"
 ///
-/// Attr spellings: `scale`/`shape` are bound whole-payload
-/// (`attrs_bind`) — equivalent to the Python attr metavars when the
-/// payload carries only that key, more permissive otherwise (see
-/// module docs); `transpose`/`concat`/`chunk` attrs are literal
-/// payloads (`attrs_lit`).
+/// Attr spellings: `scale`/`shape` are per-key binds
+/// (`attrs_fields`) — the Python `scale="SC"`/`shape="S"` attr
+/// metavariables' exact-keyset equivalent on this surface;
+/// `transpose`/`concat`/`chunk` attrs are literal payloads
+/// (`attrs_lit`).
 pub fn qkv_fuse() -> Law {
     // The fused weight: `concat(concat(Q, K, dim=0), V, dim=0)`.
     let fused_weight = Pat::Op(
@@ -769,9 +774,13 @@ pub fn qkv_fuse() -> Law {
                     "linear",
                     vec![Pat::var("x"), Pat::var("V")],
                 )))
-                .attrs_bind("SC"),
+                .attrs_fields(afields(vec![("scale", af_bind("SC"))])),
         ),
-        Pat::Op(OpPat::new("sdpa").args(rhs_heads).attrs_bind("SC")),
+        Pat::Op(
+            OpPat::new("sdpa")
+                .args(rhs_heads)
+                .attrs_fields(afields(vec![("scale", af_bind("SC"))])),
+        ),
     )
  .with_law(
  "Triple pairing <q,k,v> : X -> V^3 — three projections of the same input are ONE GEMM into the product space, then three zero-cost chunk projections.  (Fused QKV.)",
