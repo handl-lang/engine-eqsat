@@ -51,6 +51,9 @@
 //! * [`pointwise_factor`] — `POINTWISE_FACTOR_RULES`, the opt-in
 //!   Hadamard distributivity pair the Python bank deliberately keeps
 //!   out of `ALL_RULES` (a closure generator).
+//! * [`scan`] — `SCAN_LAWS` + `SCAN_DIAG_LAWS`, the 22-law
+//!   scan-monoid family (dense + diagonal-affine carriers), opt-in
+//!   like the Python `CARRIER_SEARCH` preset.
 //! * [`all`] — `simplification` + `categorical`, the portable subset
 //!   of `ALL_RULES` (`all_rules()`).
 //!
@@ -3672,6 +3675,520 @@ pub fn conv_folds() -> Vec<Law> {
 }
 
 // ---------------------------------------------------------------------------
+//  Scan monoids — `SCAN_LAWS` / `SCAN_DIAG_LAWS` (laws/scan.py)
+// ---------------------------------------------------------------------------
+//
+// The affine-map and diagonal-affine scan carriers: a recurrence step
+// `h ↦ A·h + x` (dense) or `h ↦ a ⊙ h + x` (diagonal) is a monoid
+// element; `aff`/`aff_compose`/`apply` and `aff_diag`/`affd_compose`/
+// `applyd` are the carrier-domain spelling the balanced-tree (Blelloch)
+// reassociation reaches through associativity alone. Opt-in like the
+// Python collections — they sit in `CARRIER_SEARCH`, never `DEFAULT`.
+// Every guard the family carries fits the ported vocabulary:
+// `op-in`/`leaf`/`not`/`const` conds and the `bcast` dspec channel.
+
+/// `_COND_AFFD_STATE` — the `h`-is-state side condition shared by the
+/// four `affd_lift*` operand-position variants: `h` must be a previous
+/// step's `add`/`sub` spine, an already lifted application, or a leaf
+/// (per-step vectors are NOT states — an economy guard, not a
+/// soundness one: the rewrite is valid for any `h`).
+fn affd_state_cond() -> Value {
+    json!([
+        "or",
+        ["op-in", "h", ["add", "sub", "apply", "applyd"]],
+        ["leaf", "h"]
+    ])
+}
+
+/// `_COND_AFFD_UNIT_STATE` — the unit-lift variant: same state shape,
+/// plus a `Const` exclusion (a scalar offset is not an accumulating
+/// state).
+fn affd_unit_cond() -> Value {
+    json!([
+        "or",
+        ["op-in", "h", ["add", "sub", "apply", "applyd"]],
+        ["and", ["leaf", "h"], ["not", ["const", "h"]]]
+    ])
+}
+
+/// `_DSPEC_AFFD_UNIT` — `US` := broadcast(shape(h), shape(x)): the
+/// unit diagonal materialises at the add's output shape (all ones);
+/// `bcast` declines when the result is not concrete, the old hook's
+/// veto verbatim.
+fn affd_unit_dspec() -> Value {
+    json!({"US": ["bcast", "h", "x"]})
+}
+
+/// `_AFFD_UNIT` — `expand(Const(1.0), shape=US)`: the unit diagonal as
+/// a shared pattern fragment, spelled as a Const broadcast so the
+/// carrier leaf reports the state's `(d,)` shape like every other
+/// `aff_diag` leaf (the batched executor stacks leaf a-parts).
+fn affd_unit() -> Pat {
+    Pat::Op(
+        OpPat::new("expand")
+            .arg(Pat::constant(json!(1.0)))
+            .attrs_fields(afields(vec![("shape", af_bind("US"))])),
+    )
+}
+
+/// `applyd(aff_diag(a, x), h)` — the diagonal-affine application every
+/// `affd_lift*` variant rewrites to (`a` is the step's diagonal part).
+fn affd_apply(a: Pat) -> Pat {
+    Pat::op(
+        "applyd",
+        vec![Pat::op("aff_diag", vec![a, Pat::var("x")]), Pat::var("h")],
+    )
+}
+
+/// `applyd(affd_compose(aff_diag(a, x), f), h)` — the composed-step
+/// RHS every `affd_lift*_step*` variant rewrites to.
+fn affd_compose_apply(a: Pat) -> Pat {
+    Pat::op(
+        "applyd",
+        vec![
+            Pat::op(
+                "affd_compose",
+                vec![Pat::op("aff_diag", vec![a, Pat::var("x")]), Pat::var("f")],
+            ),
+            Pat::var("h"),
+        ],
+    )
+}
+
+/// The six `SCAN_LAWS` — the dense affine monoid, Python order.
+fn scan_laws() -> Vec<Law> {
+    let tag = |l: Law| l.with_tag("scan");
+    vec![
+        // aff_lift: add(matmul(A, h), x) → apply(aff(A, x), h)
+        tag(Law::new(
+            "aff_lift",
+            Pat::op(
+                "add",
+                vec![
+                    Pat::op("matmul", vec![Pat::var("A"), Pat::var("h")]),
+                    Pat::var("x"),
+                ],
+            ),
+            Pat::op(
+                "apply",
+                vec![
+                    Pat::op("aff", vec![Pat::var("A"), Pat::var("x")]),
+                    Pat::var("h"),
+                ],
+            ),
+        )
+        .with_law("recurrence step is affine-map application")),
+        // aff_lift_step: add(matmul(A, apply(f, h)), x) →
+        //   apply(aff_compose(aff(A, x), f), h)
+        tag(Law::new(
+            "aff_lift_step",
+            Pat::op(
+                "add",
+                vec![
+                    Pat::op(
+                        "matmul",
+                        vec![
+                            Pat::var("A"),
+                            Pat::op("apply", vec![Pat::var("f"), Pat::var("h")]),
+                        ],
+                    ),
+                    Pat::var("x"),
+                ],
+            ),
+            Pat::op(
+                "apply",
+                vec![
+                    Pat::op(
+                        "aff_compose",
+                        vec![
+                            Pat::op("aff", vec![Pat::var("A"), Pat::var("x")]),
+                            Pat::var("f"),
+                        ],
+                    ),
+                    Pat::var("h"),
+                ],
+            ),
+        )
+        .with_law("compose step with the preceding map")),
+        // aff_unlift: apply(aff(A, x), h) → add(matmul(A, h), x)
+        tag(Law::new(
+            "aff_unlift",
+            Pat::op(
+                "apply",
+                vec![
+                    Pat::op("aff", vec![Pat::var("A"), Pat::var("x")]),
+                    Pat::var("h"),
+                ],
+            ),
+            Pat::op(
+                "add",
+                vec![
+                    Pat::op("matmul", vec![Pat::var("A"), Pat::var("h")]),
+                    Pat::var("x"),
+                ],
+            ),
+        )
+        .with_law("affine application unfolds")),
+        // aff_compose_unfold: apply(aff_compose(f, g), h) →
+        //   apply(f, apply(g, h))
+        tag(Law::new(
+            "aff_compose_unfold",
+            Pat::op(
+                "apply",
+                vec![
+                    Pat::op("aff_compose", vec![Pat::var("f"), Pat::var("g")]),
+                    Pat::var("h"),
+                ],
+            ),
+            Pat::op(
+                "apply",
+                vec![
+                    Pat::var("f"),
+                    Pat::op("apply", vec![Pat::var("g"), Pat::var("h")]),
+                ],
+            ),
+        )
+        .with_law("composition is sequential application")),
+        // aff_assoc: aff_compose(aff_compose(f, g), h) →
+        //   aff_compose(f, aff_compose(g, h))
+        tag(Law::new(
+            "aff_assoc",
+            Pat::op(
+                "aff_compose",
+                vec![
+                    Pat::op("aff_compose", vec![Pat::var("f"), Pat::var("g")]),
+                    Pat::var("h"),
+                ],
+            ),
+            Pat::op(
+                "aff_compose",
+                vec![
+                    Pat::var("f"),
+                    Pat::op("aff_compose", vec![Pat::var("g"), Pat::var("h")]),
+                ],
+            ),
+        )
+        .with_law("affine composition is associative")),
+        // aff_assoc_rev: the reverse bracketing.
+        tag(Law::new(
+            "aff_assoc_rev",
+            Pat::op(
+                "aff_compose",
+                vec![
+                    Pat::var("f"),
+                    Pat::op("aff_compose", vec![Pat::var("g"), Pat::var("h")]),
+                ],
+            ),
+            Pat::op(
+                "aff_compose",
+                vec![
+                    Pat::op("aff_compose", vec![Pat::var("f"), Pat::var("g")]),
+                    Pat::var("h"),
+                ],
+            ),
+        )
+        .with_law("affine composition is associative")),
+    ]
+}
+
+/// The sixteen `SCAN_DIAG_LAWS` — the diagonal-affine monoid for
+/// elementwise / Mamba-faithful SSM steps, Python order: the four
+/// `affd_lift` operand positions, the four `affd_lift_step`
+/// positions, the two unit lifts, the two unit steps, then the
+/// unfold/compose/assoc tail.
+fn scan_diag_laws() -> Vec<Law> {
+    let tag = |l: Law| l.with_tag("scan");
+    let state = affd_state_cond();
+    let unit = affd_unit_cond();
+    let unit_dspec = affd_unit_dspec();
+    let lift_law =
+        "diagonal recurrence step is diagonal-affine application: a⊙h + x = (aff_diag(a,x))(h)";
+    let lift_swap_law =
+        "mul-order variant of affd_lift (canonicalised terms put the state operand first)";
+    let lift_post_law = "add-order variant of affd_lift (state-mul in the second add slot)";
+    let lift_post_swap_law = "remaining operand position of affd_lift";
+    vec![
+        // -- the four operand positions of the mul-form step --------
+        tag(
+            Law::new(
+                "affd_lift",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::op("mul", vec![Pat::var("a"), Pat::var("h")]),
+                        Pat::var("x"),
+                    ],
+                ),
+                affd_apply(Pat::var("a")),
+            )
+            .with_law(lift_law)
+            .with_cond(state.clone()),
+        ),
+        tag(
+            Law::new(
+                "affd_lift_swap",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::op("mul", vec![Pat::var("h"), Pat::var("a")]),
+                        Pat::var("x"),
+                    ],
+                ),
+                affd_apply(Pat::var("a")),
+            )
+            .with_law(lift_swap_law)
+            .with_cond(state.clone()),
+        ),
+        tag(
+            Law::new(
+                "affd_lift_post",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op("mul", vec![Pat::var("a"), Pat::var("h")]),
+                    ],
+                ),
+                affd_apply(Pat::var("a")),
+            )
+            .with_law(lift_post_law)
+            .with_cond(state.clone()),
+        ),
+        tag(
+            Law::new(
+                "affd_lift_post_swap",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op("mul", vec![Pat::var("h"), Pat::var("a")]),
+                    ],
+                ),
+                affd_apply(Pat::var("a")),
+            )
+            .with_law(lift_post_swap_law)
+            .with_cond(state),
+        ),
+        // -- the four operand positions of the composed step --------
+        tag(
+            Law::new(
+                "affd_lift_step",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::op(
+                            "mul",
+                            vec![
+                                Pat::var("a"),
+                                Pat::op("applyd", vec![Pat::var("f"), Pat::var("h")]),
+                            ],
+                        ),
+                        Pat::var("x"),
+                    ],
+                ),
+                affd_compose_apply(Pat::var("a")),
+            )
+            .with_law("compose step with the preceding map"),
+        ),
+        tag(
+            Law::new(
+                "affd_lift_step_swap",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::op(
+                            "mul",
+                            vec![
+                                Pat::op("applyd", vec![Pat::var("f"), Pat::var("h")]),
+                                Pat::var("a"),
+                            ],
+                        ),
+                        Pat::var("x"),
+                    ],
+                ),
+                affd_compose_apply(Pat::var("a")),
+            )
+            .with_law("mul-order variant of affd_lift_step"),
+        ),
+        tag(
+            Law::new(
+                "affd_lift_step_post",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op(
+                            "mul",
+                            vec![
+                                Pat::var("a"),
+                                Pat::op("applyd", vec![Pat::var("f"), Pat::var("h")]),
+                            ],
+                        ),
+                    ],
+                ),
+                affd_compose_apply(Pat::var("a")),
+            )
+            .with_law("add-order variant of affd_lift_step"),
+        ),
+        tag(
+            Law::new(
+                "affd_lift_step_post_swap",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op(
+                            "mul",
+                            vec![
+                                Pat::op("applyd", vec![Pat::var("f"), Pat::var("h")]),
+                                Pat::var("a"),
+                            ],
+                        ),
+                    ],
+                ),
+                affd_compose_apply(Pat::var("a")),
+            )
+            .with_law("remaining operand position of affd_lift_step"),
+        ),
+        // -- the unit lift: pure accumulation h + x ≡ a ≡ 1 ---------
+        tag(
+            Law::new(
+                "affd_lift_unit",
+                Pat::op("add", vec![Pat::var("h"), Pat::var("x")]),
+                affd_apply(affd_unit()),
+            )
+            .with_law(
+                "Unit introduction: pure accumulation h + x IS the diagonal affine map with a ≡ 1 — applyd(aff_diag(1, x), h).",
+            )
+            .with_cond(unit.clone())
+            .with_dspec(unit_dspec.clone()),
+        ),
+        tag(
+            Law::new(
+                "affd_lift_unit_post",
+                Pat::op("add", vec![Pat::var("x"), Pat::var("h")]),
+                affd_apply(affd_unit()),
+            )
+            .with_law(
+                "add-order variant of affd_lift_unit (state operand in the second add slot)",
+            )
+            .with_cond(unit.clone())
+            .with_dspec(unit_dspec.clone()),
+        ),
+        tag(
+            Law::new(
+                "affd_lift_unit_step",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::op("applyd", vec![Pat::var("f"), Pat::var("h")]),
+                        Pat::var("x"),
+                    ],
+                ),
+                affd_compose_apply(affd_unit()),
+            )
+            .with_law(
+                "compose a unit (pure-accumulation) step with the preceding map — the h ↦ h + x analogue of affd_lift_step",
+            )
+            .with_dspec(unit_dspec.clone()),
+        ),
+        tag(
+            Law::new(
+                "affd_lift_unit_step_post",
+                Pat::op(
+                    "add",
+                    vec![
+                        Pat::var("x"),
+                        Pat::op("applyd", vec![Pat::var("f"), Pat::var("h")]),
+                    ],
+                ),
+                affd_compose_apply(affd_unit()),
+            )
+            .with_law("add-order variant of affd_lift_unit_step")
+            .with_dspec(unit_dspec),
+        ),
+        // -- the unfold / compose / assoc tail ----------------------
+        // affd_unlift: applyd(aff_diag(a, x), h) → add(mul(a, h), x)
+        tag(Law::new(
+            "affd_unlift",
+            Pat::op(
+                "applyd",
+                vec![
+                    Pat::op("aff_diag", vec![Pat::var("a"), Pat::var("x")]),
+                    Pat::var("h"),
+                ],
+            ),
+            Pat::op(
+                "add",
+                vec![
+                    Pat::op("mul", vec![Pat::var("a"), Pat::var("h")]),
+                    Pat::var("x"),
+                ],
+            ),
+        )
+        .with_law("diagonal-affine application unfolds")),
+        // affd_compose_unfold: applyd(affd_compose(f, g), h) →
+        //   applyd(f, applyd(g, h))
+        tag(Law::new(
+            "affd_compose_unfold",
+            Pat::op(
+                "applyd",
+                vec![
+                    Pat::op("affd_compose", vec![Pat::var("f"), Pat::var("g")]),
+                    Pat::var("h"),
+                ],
+            ),
+            Pat::op(
+                "applyd",
+                vec![
+                    Pat::var("f"),
+                    Pat::op("applyd", vec![Pat::var("g"), Pat::var("h")]),
+                ],
+            ),
+        )
+        .with_law("composition is sequential application")),
+        // affd_assoc / affd_assoc_rev: diagonal-affine composition is
+        // associative.
+        tag(Law::new(
+            "affd_assoc",
+            Pat::op(
+                "affd_compose",
+                vec![
+                    Pat::op("affd_compose", vec![Pat::var("f"), Pat::var("g")]),
+                    Pat::var("h"),
+                ],
+            ),
+            Pat::op(
+                "affd_compose",
+                vec![
+                    Pat::var("f"),
+                    Pat::op("affd_compose", vec![Pat::var("g"), Pat::var("h")]),
+                ],
+            ),
+        )
+        .with_law("diagonal-affine composition is associative")),
+        tag(Law::new(
+            "affd_assoc_rev",
+            Pat::op(
+                "affd_compose",
+                vec![
+                    Pat::var("f"),
+                    Pat::op("affd_compose", vec![Pat::var("g"), Pat::var("h")]),
+                ],
+            ),
+            Pat::op(
+                "affd_compose",
+                vec![
+                    Pat::op("affd_compose", vec![Pat::var("f"), Pat::var("g")]),
+                    Pat::var("h"),
+                ],
+            ),
+        )
+        .with_law("diagonal-affine composition is associative")),
+    ]
+}
+
+// ---------------------------------------------------------------------------
 //  Law packs — mirror the Python bank collections.
 // ---------------------------------------------------------------------------
 
@@ -3825,6 +4342,17 @@ pub fn prior_art() -> Vec<Law> {
         div_const_to_mul(),
         mul_const_div(),
     ]);
+    laws
+}
+
+/// `SCAN_LAWS` + `SCAN_DIAG_LAWS` — the 22-law scan-monoid family
+/// (dense affine + diagonal-affine carriers), opt-in like the Python
+/// collections (`CARRIER_SEARCH`, never `DEFAULT`). The `affd_lift*`
+/// state conds (`op-in`/`leaf`/`not`/`const`) and the unit lift's
+/// `bcast` dspec are carried as record data verbatim.
+pub fn scan() -> Vec<Law> {
+    let mut laws = scan_laws();
+    laws.extend(scan_diag_laws());
     laws
 }
 

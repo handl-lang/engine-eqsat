@@ -629,6 +629,15 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     assert_eq!(att.laws(), builtin::attention().as_slice());
     assert_eq!(att.compile().unwrap().len(), att.laws().len());
 
+    // kit-eqsat pack "scan" — the opt-in SCAN_LAWS + SCAN_DIAG_LAWS
+    // monoids (CARRIER_SEARCH, never DEFAULT): the `affd_lift*` state
+    // conds and the unit lift's `bcast` dspec compile through the
+    // ported guard vocabulary.
+    let scan = LawSet::from_json(pack("scan")).unwrap();
+    assert_eq!(scan.laws(), builtin::scan().as_slice());
+    assert_eq!(scan.laws().len(), 22);
+    assert_eq!(scan.compile().unwrap().len(), scan.laws().len());
+
     // laws/reshape_flatten_demo.json — the UNSOUND attrs-bind demo
     // (engine-local; kit-eqsat excludes it by design)
     // (matcher coverage only; the `_demo` name is the warning).
@@ -636,7 +645,7 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     assert_eq!(flat.laws(), &[builtin::reshape_flatten_demo()]);
 
     // And the records re-serialize byte-stably through the codec.
-    for set in [simpl, pa, cat, pf, att, flat] {
+    for set in [simpl, pa, cat, pf, att, scan, flat] {
         let reloaded = LawSet::from_data(&set.to_data()).unwrap();
         assert_eq!(reloaded, set);
     }
