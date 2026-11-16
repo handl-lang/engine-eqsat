@@ -650,6 +650,16 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     assert_eq!(scan.laws().len(), 22);
     assert_eq!(scan.compile().unwrap().len(), scan.laws().len());
 
+    // kit-eqsat pack "layout" — the opt-in LAYOUT_RULES family
+    // (ALL_RULES_WITH_LAYOUT / WITH_LAYOUT, never DEFAULT): the 77
+    // transpose/layout migration laws whose procedural `check=`
+    // hooks translate to `axes-*`/`rank`/`dim-compat`/`mm-out`
+    // conds — every record compiles through the ported vocabulary.
+    let layout = LawSet::from_json(pack("layout")).unwrap();
+    assert_eq!(layout.laws(), builtin::layout().as_slice());
+    assert_eq!(layout.laws().len(), 77);
+    assert_eq!(layout.compile().unwrap().len(), layout.laws().len());
+
     // laws/reshape_flatten_demo.json — the UNSOUND attrs-bind demo
     // (engine-local; kit-eqsat excludes it by design)
     // (matcher coverage only; the `_demo` name is the warning).
@@ -657,7 +667,7 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     assert_eq!(flat.laws(), &[builtin::reshape_flatten_demo()]);
 
     // And the records re-serialize byte-stably through the codec.
-    for set in [simpl, pa, cat, pf, att, scan, flat] {
+    for set in [simpl, pa, cat, pf, att, scan, layout, flat] {
         let reloaded = LawSet::from_data(&set.to_data()).unwrap();
         assert_eq!(reloaded, set);
     }

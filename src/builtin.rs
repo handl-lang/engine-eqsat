@@ -64,6 +64,11 @@
 //! * [`scan`] — `SCAN_LAWS` + `SCAN_DIAG_LAWS`, the 22-law
 //!   scan-monoid family (dense + diagonal-affine carriers), opt-in
 //!   like the Python `CARRIER_SEARCH` preset.
+//! * [`layout`] — `LAYOUT_RULES`, the 77-law transpose/layout
+//!   migration family (pointwise commutation, involution, product
+//!   transpose, the NT bridge), opt-in like the Python
+//!   `ALL_RULES_WITH_LAYOUT`/`WITH_LAYOUT` preset — every
+//!   procedural `check=` hook re-authored as a `cond` tree.
 //! * [`all`] — `simplification` + `categorical`, the portable subset
 //!   of `ALL_RULES` (`all_rules()`).
 //!
@@ -5278,6 +5283,371 @@ fn scan_diag_laws() -> Vec<Law> {
         )
         .with_law("diagonal-affine composition is associative")),
     ]
+}
+
+// ---------------------------------------------------------------------------
+//  Layout laws — `LAYOUT_RULES` (laws/layout.py)
+// ---------------------------------------------------------------------------
+//
+// The transpose/layout migration family: `transpose` is a pure
+// re-layout (a stride permutation lowering to a view), so these laws
+// let the e-graph hold both the materialised-transpose and the
+// migrated/fused form — pointwise naturality (push/pull over every
+// unary and same-rank binary pointwise op, both the canonical
+// `dim0`/`dim1` spelling and the bare `t()` form), the involution
+// `T∘T = id`, the product transpose `(A@B).mT = B.mT @ A.mT` and its
+// reverse `P.mT @ Q.mT = (Q@P).mT`, and the NT bridge
+// `matmul(x, W.mT) ≡ linear(x, W)`. Opt-in like the Python surface —
+// `ALL_RULES_WITH_LAYOUT`/`WITH_LAYOUT`, never `DEFAULT` (measured
+// closure-cost blowup, tensor.py's ALL_RULES note). All 77 members
+// carry the `layout` tag; every procedural `check=` hook translates
+// to the ported `cond` vocabulary (`axes-*`/`rank`/`rank-eq`/
+// `dim-compat`/`mm-out` shape specs) — no declines in this pack.
+
+/// The twelve `POINTWISE_UNARY_OPS` (Python `sorted` order).
+const LAYOUT_UNARY_OPS: &[&str] = &[
+    "abs", "exp", "gelu", "log", "neg", "relu", "rsqrt", "sigmoid", "silu", "sqrt", "square",
+    "tanh",
+];
+
+/// The four `POINTWISE_BINARY_OPS` (Python `sorted` order).
+const LAYOUT_BINARY_OPS: &[&str] = &["add", "div", "mul", "sub"];
+
+/// `_t(term, dimmed, k0, k1)` — a `transpose` pattern over *term*.
+/// The dimmed spelling binds `dim0`/`dim1` to the attr metavariables
+/// *k0*/*k1* (the names every transpose in one rule shares); the bare
+/// spelling is the attr-less `t()` form — the implicit last-two swap.
+fn layout_t(term: Pat, dimmed: bool, k0: &str, k1: &str) -> Pat {
+    if dimmed {
+        Pat::Op(
+            OpPat::new("transpose")
+                .arg(term)
+                .attrs_fields(afields(vec![("dim0", af_bind(k0)), ("dim1", af_bind(k1))])),
+        )
+    } else {
+        Pat::Op(OpPat::new("transpose").arg(term))
+    }
+}
+
+/// `_mt(term)` — the canonical last-two-axis swap mint: the `x.mT`
+/// transpose with literal `dim0=-2, dim1=-1` attrs.
+fn layout_mt(term: Pat) -> Pat {
+    Pat::Op(
+        OpPat::new("transpose")
+            .arg(term)
+            .attrs_lit(json!({"dim0": -2, "dim1": -1})),
+    )
+}
+
+/// `_check_commute_unary` — `T(f(x)) = f(T(x))`: the bound `x` must
+/// carry a tuple shape whose transpose axis pair is real and
+/// distinct (rank ≥ 2, `d0 != d1` after normalisation; a self-pair
+/// is a no-op view, not a layout worth holding).
+fn cond_commute_unary() -> Value {
+    json!(["axes-distinct", "x", "D0", "D1"])
+}
+
+/// `_check_commute_binary` — `T(g(a, b)) = g(T(a), T(b))`: equal-rank
+/// pointwise operands only (broadcasting is positional — a common
+/// permutation preserves the broadcast dim-for-dim).
+fn cond_commute_binary() -> Value {
+    json!([
+        "and",
+        ["rank-eq", "a", "b"],
+        ["axes-distinct", "a", "D0", "D1"]
+    ])
+}
+
+/// `_check_involution` — `T(T(x)) = x`: both transposes swap the SAME
+/// axis pair (`axes-eq` requires both pairs distinct and equal as
+/// sets).
+fn cond_involution() -> Value {
+    json!(["axes-eq", "x", "I0", "I1", "O0", "O1"])
+}
+
+/// `_check_transpose_matmul` — `(A@B).mT = B.mT @ A.mT`: rank-≥2
+/// operands whose `mm-out` spec resolves (the batch broadcast and
+/// contraction checks `_matmul_shape` folds in), with the outer
+/// transpose the output's last-two swap.
+fn cond_transpose_matmul() -> Value {
+    json!([
+        "and",
+        ["rank", "A", ">=", 2],
+        ["rank", "B", ">=", 2],
+        ["axes-last2", ["mm-out", "A", "B"], "D0", "D1"]
+    ])
+}
+
+/// `_check_mm_transposes` — `P.mT @ Q.mT = (Q@P).mT`: both inner
+/// transposes are the last-two swap of their own operand (rank < 2
+/// declines inside `axes-pair`).
+fn cond_mm_transposes() -> Value {
+    json!([
+        "and",
+        ["axes-last2", "P", "P0", "P1"],
+        ["axes-last2", "Q", "Q0", "Q1"]
+    ])
+}
+
+/// `_linear_shapes_ok` — the `linear` contract shared by the NT
+/// bridge pair: `W` rank-2 `(out, in)`, `x` rank ≥ 1, and `x`'s last
+/// dim feeds `in` (`dim-compat` — unknown dims wildcard, matching
+/// the hook's int-only comparison).
+fn cond_linear_shapes() -> Value {
+    json!([
+        "and",
+        ["rank", "W", "==", 2],
+        ["rank", "x", ">=", 1],
+        ["dim-compat", "x", -1, "W", 1]
+    ])
+}
+
+/// `_check_mm_t_is_linear` — `matmul(x, W.mT) ≡ linear(x, W)`: the
+/// linear contract plus the bound transpose being W's full swap
+/// (rank-2 makes the last-two pair the only real one).
+fn cond_mm_t_is_linear() -> Value {
+    json!([
+        "and",
+        ["rank", "W", "==", 2],
+        ["rank", "x", ">=", 1],
+        ["dim-compat", "x", -1, "W", 1],
+        ["axes-last2", "W", "D0", "D1"]
+    ])
+}
+
+/// `_commute_rules()` — the 64 pointwise commutation laws: per op,
+/// per spelling (dimmed then bare), push then pull — Python order
+/// (48 unary over `POINTWISE_UNARY_OPS`, 16 binary over
+/// `POINTWISE_BINARY_OPS`).
+fn layout_commute_rules() -> Vec<Law> {
+    let mut laws = Vec::with_capacity(64);
+    for &op in LAYOUT_UNARY_OPS {
+        for bare in [false, true] {
+            let tag = if bare { "_bare" } else { "" };
+            let fx = Pat::op(op, vec![Pat::var("x")]);
+            let tx = layout_t(Pat::var("x"), !bare, "D0", "D1");
+            let outer = layout_t(fx.clone(), !bare, "D0", "D1");
+            let inner_op = Pat::op(op, vec![tx]);
+            let push_law = format!(
+                "Transpose commutes with the pointwise map {op}: T·f(x) = f(T·x) — naturality of the elementwise action."
+            );
+            let pull_law =
+                format!("Inverse: f(T·x) = T·f(x) for {op} — hoist the layout change back out.");
+            laws.push(
+                Law::new(
+                    format!("transpose_push_{op}{tag}"),
+                    outer.clone(),
+                    inner_op.clone(),
+                )
+                .with_law(push_law)
+                .with_cond(cond_commute_unary())
+                .with_tag("layout"),
+            );
+            laws.push(
+                Law::new(format!("transpose_pull_{op}{tag}"), inner_op, outer)
+                    .with_law(pull_law)
+                    .with_cond(cond_commute_unary())
+                    .with_tag("layout"),
+            );
+        }
+    }
+    for &op in LAYOUT_BINARY_OPS {
+        for bare in [false, true] {
+            let tag = if bare { "_bare" } else { "" };
+            let fab = Pat::op(op, vec![Pat::var("a"), Pat::var("b")]);
+            // Shared attr metavariables on both operand transposes
+            // force an identical swap — positional broadcasting only
+            // commutes with a common permutation.
+            let tab = Pat::op(
+                op,
+                vec![
+                    layout_t(Pat::var("a"), !bare, "D0", "D1"),
+                    layout_t(Pat::var("b"), !bare, "D0", "D1"),
+                ],
+            );
+            let outer = layout_t(fab, !bare, "D0", "D1");
+            laws.push(
+                Law::new(
+                    format!("transpose_push_{op}{tag}"),
+                    outer.clone(),
+                    tab.clone(),
+                )
+                .with_law(format!(
+                    "Transpose distributes over {op}: T·(a ⊙ b) = T·a ⊙ T·b — same-rank broadcast commutes with relayout."
+                ))
+                .with_cond(cond_commute_binary())
+                .with_tag("layout"),
+            );
+            laws.push(
+                Law::new(format!("transpose_pull_{op}{tag}"), tab, outer)
+                    .with_law(format!("Inverse: T·a ⊙ T·b = T·(a ⊙ b) for {op}."))
+                    .with_cond(cond_commute_binary())
+                    .with_tag("layout"),
+            );
+        }
+    }
+    laws
+}
+
+/// `_involution_rules()` — `T(T(x)) = x` over every bare/dimmed
+/// spelling combination (inner then outer, Python order dd/bd/db/bb).
+fn layout_involution_rules() -> Vec<Law> {
+    let mut out = Vec::with_capacity(4);
+    for inner in [true, false] {
+        for outer in [true, false] {
+            let tag = format!(
+                "{}{}",
+                if outer { "d" } else { "b" },
+                if inner { "d" } else { "b" }
+            );
+            out.push(
+                Law::new(
+                    format!("transpose_transpose_{tag}"),
+                    layout_t(
+                        layout_t(Pat::var("x"), inner, "I0", "I1"),
+                        outer,
+                        "O0",
+                        "O1",
+                    ),
+                    Pat::var("x"),
+                )
+                .with_law(
+                    "Transpose is an involution per axis pair: T₂∘T₁ = id when both swap the same axes.",
+                )
+                .with_cond(cond_involution())
+                .with_tag("layout"),
+            );
+        }
+    }
+    out
+}
+
+/// `_matmul_rules()` — the product-transpose law both spellings and
+/// directions, then the four `matmul_transpose_rev_*` operand-spelling
+/// combinations (Python order dd/db/bd/bb).
+fn layout_matmul_rules() -> Vec<Law> {
+    let mm = || Pat::op("matmul", vec![Pat::var("A"), Pat::var("B")]);
+    let mut out = vec![
+        Law::new(
+            "transpose_matmul",
+            layout_t(mm(), true, "D0", "D1"),
+            Pat::op(
+                "matmul",
+                vec![layout_mt(Pat::var("B")), layout_mt(Pat::var("A"))],
+            ),
+        )
+        .with_law(
+            "(A@B).mT = B.mT @ A.mT — the output's last-two swap folds into per-operand transposes (the BLAS NT/TN flag read, batched).",
+        )
+        .with_cond(cond_transpose_matmul())
+        .with_tag("layout"),
+        Law::new(
+            "transpose_matmul_bare",
+            layout_t(mm(), false, "D0", "D1"),
+            Pat::op(
+                "matmul",
+                vec![layout_mt(Pat::var("B")), layout_mt(Pat::var("A"))],
+            ),
+        )
+        .with_law(
+            "Bare ``t()`` spelling of the product-transpose law — an implicit last-two swap.",
+        )
+        .with_cond(cond_transpose_matmul())
+        .with_tag("layout"),
+    ];
+    for pd in [true, false] {
+        for qd in [true, false] {
+            let tag = format!(
+                "{}{}",
+                if pd { "d" } else { "b" },
+                if qd { "d" } else { "b" }
+            );
+            out.push(
+                Law::new(
+                    format!("matmul_transpose_rev_{tag}"),
+                    Pat::op(
+                        "matmul",
+                        vec![
+                            layout_t(Pat::var("P"), pd, "P0", "P1"),
+                            layout_t(Pat::var("Q"), qd, "Q0", "Q1"),
+                        ],
+                    ),
+                    layout_mt(Pat::op("matmul", vec![Pat::var("Q"), Pat::var("P")])),
+                )
+                .with_law(
+                    "P.mT @ Q.mT = (Q@P).mT — hoist the product's last-two swap outward, dropping both operand transposes.",
+                )
+                .with_cond(cond_mm_transposes())
+                .with_tag("layout"),
+            );
+        }
+    }
+    out
+}
+
+/// The NT bridge trio — `LINEAR_FROM_MM_T`,
+/// `LINEAR_FROM_MM_T_BARE`, `LINEAR_TO_MM_T`.
+fn layout_linear_rules() -> Vec<Law> {
+    vec![
+        Law::new(
+            "linear_from_matmul_t",
+            Pat::op(
+                "matmul",
+                vec![
+                    Pat::var("x"),
+                    layout_t(Pat::var("W"), true, "D0", "D1"),
+                ],
+            ),
+            Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]),
+        )
+        .with_law(
+            "matmul(x, W.mT) ≡ linear(x, W): F.linear IS the BLAS-NT call — W stays in (out, in) storage and no transpose materialises.",
+        )
+        .with_cond(cond_mm_t_is_linear())
+        .with_tag("layout"),
+        Law::new(
+            "linear_from_matmul_t_bare",
+            Pat::op(
+                "matmul",
+                vec![Pat::var("x"), layout_t(Pat::var("W"), false, "D0", "D1")],
+            ),
+            Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]),
+        )
+        .with_law(
+            "Bare-t() spelling of the NT bridge: x @ W.t() = linear(x, W) — the exported form of ``x @ W.t()``.",
+        )
+        .with_cond(cond_mm_t_is_linear())
+        .with_tag("layout"),
+        Law::new(
+            "linear_to_matmul_t",
+            Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]),
+            Pat::op(
+                "matmul",
+                vec![Pat::var("x"), layout_mt(Pat::var("W"))],
+            ),
+        )
+        .with_law(
+            "Reverse NT bridge — exposes the weight's implicit transpose so the migration laws can move it.",
+        )
+        .with_cond(cond_linear_shapes())
+        .with_tag("layout"),
+    ]
+}
+
+/// `LAYOUT_RULES` — the 77-law transpose/layout migration family
+/// (64 pointwise commutation — 48 unary + 16 binary — + 4
+/// involution + 6 matmul transpose + 3 NT-bridge, in Python order:
+/// commute, involution, matmul, linear), opt-in like the Python
+/// `WITH_LAYOUT` preset (never `DEFAULT`/`all`). Every member's
+/// procedural `check=` hook is re-authored as a `cond` tree over
+/// the ported `axes-*`/`rank`/`dim-compat`/`mm-out` vocabulary —
+/// the `_CHECK_TRANSLATED` divergence family on the Python side.
+pub fn layout() -> Vec<Law> {
+    let mut laws = layout_commute_rules();
+    laws.extend(layout_involution_rules());
+    laws.extend(layout_matmul_rules());
+    laws.extend(layout_linear_rules());
+    laws
 }
 
 // ---------------------------------------------------------------------------
