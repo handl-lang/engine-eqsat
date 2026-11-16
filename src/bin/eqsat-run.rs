@@ -234,6 +234,7 @@ fn run(spec: &Value) -> Result<Value, RunError> {
     let mut sat = eqsat::saturate_json(&terms, laws.laws(), &opts)?;
     let root = sat.roots[root_idx];
 
+    let t_extract = std::time::Instant::now();
     // extract_best_json prices DAG-safely (identity-memoised
     // CostSpec::price_dag) and serialises tree-or-dag.program by the
     // expansion bounds — the plain `to_kernel` path tree-expands
@@ -243,6 +244,12 @@ fn run(spec: &Value) -> Result<Value, RunError> {
         Ok(None) => (None, Value::Null),
         Err(e) => return Err(RunError::Engine(e)),
     };
+    if std::env::var_os("EQSAT_TIMING").is_some() {
+        eprintln!(
+            "[eqsat] extract_best_json: {:.1}ms",
+            t_extract.elapsed().as_secs_f64() * 1e3
+        );
+    }
 
     let checks: Vec<Value> = check_terms
         .iter()

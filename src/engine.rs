@@ -6,6 +6,7 @@
 //! [`crate::law::Law`] compiles them privately.
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use handl_egraph::{
     AddTermError, ClassId, EGraph, KernelTerm, RunError, RunOptions, SaturationStats, Stop,
@@ -250,13 +251,42 @@ pub fn saturate_json(
     laws: &[Law],
     opts: &SaturateOptions,
 ) -> Result<Saturated, Error> {
+    let timing = std::env::var_os("EQSAT_TIMING").is_some();
+    let t_compile = Instant::now();
     let rules = compile_rules(laws)?;
+    if timing {
+        eprintln!(
+            "[eqsat] compile_rules: {:.1}ms ({} laws)",
+            t_compile.elapsed().as_secs_f64() * 1e3,
+            rules.len()
+        );
+    }
     let mut graph = EGraph::new();
     let mut roots = Vec::with_capacity(terms.len());
+    let t_add = Instant::now();
     for t in terms {
         roots.push(crate::dag::add_json(&mut graph, t, "input")?);
     }
+    if timing {
+        eprintln!(
+            "[eqsat] add_json: {:.1}ms -> enodes={} classes={}",
+            t_add.elapsed().as_secs_f64() * 1e3,
+            graph.n_enodes(),
+            graph.n_classes()
+        );
+    }
+    let t_run = Instant::now();
     let stats = saturate_roots(&mut graph, &roots, &rules, opts)?;
+    if timing {
+        eprintln!(
+            "[eqsat] saturate_roots: {:.1}ms -> enodes={} classes={} iters={} stop={:?}",
+            t_run.elapsed().as_secs_f64() * 1e3,
+            graph.n_enodes(),
+            graph.n_classes(),
+            stats.iterations,
+            stats.stop
+        );
+    }
     Ok(Saturated {
         graph,
         roots,
