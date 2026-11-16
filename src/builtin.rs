@@ -7969,7 +7969,10 @@ fn scan_diag_laws() -> Vec<Law> {
 // `matmul(x, W.mT) ≡ linear(x, W)`. Opt-in like the Python surface —
 // `ALL_RULES_WITH_LAYOUT`/`WITH_LAYOUT`, never `DEFAULT` (measured
 // closure-cost blowup, tensor.py's ALL_RULES note). All 77 members
-// carry the `layout` tag; every procedural `check=` hook translates
+// carry the `layout` + `expansive` tags (the Python `R` helper's
+// `tags=(LAYOUT, EXPANSIVE)` — the bidirectional pairs are
+// closure-generating, so the pipeline's per-rule enode budget
+// applies); every procedural `check=` hook translates
 // to the ported `cond` vocabulary (`axes-*`/`rank`/`rank-eq`/
 // `dim-compat`/`mm-out` shape specs) — no declines in this pack.
 
@@ -8316,7 +8319,9 @@ pub fn layout() -> Vec<Law> {
     laws.extend(layout_involution_rules());
     laws.extend(layout_matmul_rules());
     laws.extend(layout_linear_rules());
-    laws
+    // The Python `R` helper tags every member `(LAYOUT, EXPANSIVE)` —
+    // applied here once so the per-constructor sites stay readable.
+    laws.into_iter().map(|l| l.with_tag("expansive")).collect()
 }
 
 // ---------------------------------------------------------------------------
