@@ -1260,6 +1260,671 @@ fn concat_pull_binary_rules() -> Vec<Law> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+//  prior_art §1 — TASO: matmul/linear concat merges and split-K
+// ---------------------------------------------------------------------------
+
+/// `dim` attr-metavariable `name` — the shared-axis spelling the
+/// mm/linear merge family binds (`CD` on the output concat, `AD` on
+/// the fused weight concat).
+fn concat_dim_named(name: &str) -> BTreeMap<String, AttrField> {
+    afields(vec![("dim", af_bind(name))])
+}
+
+/// `cat(a@W, b@W, CD) → cat(a,b,CD)@W` — the row/batch-block merge on
+/// a non-contraction axis.
+///
+/// Python: `priorart.py` `MM_CONCAT_LEFT`, cond `_COND_MM_CL`
+/// (`dim-eq a -1 b -1` + `not(axis a CD -1)`), tags
+/// `prior_art`+`fusion`.
+pub fn mm_concat_left() -> Law {
+    Law::new(
+        "mm_concat_left",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::op("matmul", vec![Pat::var("a"), Pat::var("W")]))
+                .arg(Pat::op("matmul", vec![Pat::var("b"), Pat::var("W")]))
+                .attrs_fields(concat_dim_named("CD")),
+        ),
+        Pat::Op(
+            OpPat::new("matmul")
+                .arg(Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("a"))
+                        .arg(Pat::var("b"))
+                        .attrs_fields(concat_dim_named("CD")),
+                ))
+                .arg(Pat::var("W")),
+        ),
+    )
+    .with_law(
+        "cat(a@W, b@W) = cat(a,b)@W on a non-contraction axis — row/batch blocks of a shared contraction merge into one matmul (TASO matmul-concat).",
+    )
+    .with_cond(json!([
+        "and",
+        ["dim-eq", "a", -1, "b", -1],
+        ["not", ["axis", "a", "CD", -1]]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("fusion")
+}
+
+/// `cat(a,b,CD)@W → cat(a@W, b@W, CD)` — the split direction, eqsat
+/// weighs split vs merged; derivation `mm_concat_left`.
+///
+/// Python: `priorart.py` `MM_CONCAT_LEFT_REV`, cond `_COND_MM_CL`,
+/// tags `prior_art`+`expansive`.
+pub fn mm_concat_left_rev() -> Law {
+    Law::new(
+        "mm_concat_left_rev",
+        Pat::Op(
+            OpPat::new("matmul")
+                .arg(Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("a"))
+                        .arg(Pat::var("b"))
+                        .attrs_fields(concat_dim_named("CD")),
+                ))
+                .arg(Pat::var("W")),
+        ),
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::op("matmul", vec![Pat::var("a"), Pat::var("W")]))
+                .arg(Pat::op("matmul", vec![Pat::var("b"), Pat::var("W")]))
+                .attrs_fields(concat_dim_named("CD")),
+        ),
+    )
+    .with_law(
+        "Reverse: split a matmul's non-contraction axis into two products (eqsat weighs split vs merged).",
+    )
+    .with_cond(json!([
+        "and",
+        ["dim-eq", "a", -1, "b", -1],
+        ["not", ["axis", "a", "CD", -1]]
+    ]))
+    .with_derivation("mm_concat_left")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// Python `_COND_MM_CR` — the column-block merge guard: `CD` pinned
+/// to the output axis (`-1`), both right operands rank-2 with the
+/// contraction dim (`-2`) agreeing and matching `x`'s last axis.
+fn cond_mm_cr() -> Value {
+    json!([
+        "and",
+        ["rank", "x", "<=", 2],
+        ["rank", "b", "==", 2],
+        ["rank", "c", "==", 2],
+        ["attr-eq", "CD", -1],
+        ["axis", "b", "CD", -1],
+        ["dim-eq", "b", -2, "c", -2],
+        ["dim-eq", "x", -1, "b", -2]
+    ])
+}
+
+/// `cat(x@b, x@c, CD) → x@cat(b,c,CD)` — column blocks of a shared
+/// input merge into one matmul.
+///
+/// Python: `priorart.py` `MM_CONCAT_RIGHT`, cond `_COND_MM_CR`, tags
+/// `prior_art`+`fusion`.
+pub fn mm_concat_right() -> Law {
+    Law::new(
+        "mm_concat_right",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::op("matmul", vec![Pat::var("x"), Pat::var("b")]))
+                .arg(Pat::op("matmul", vec![Pat::var("x"), Pat::var("c")]))
+                .attrs_fields(concat_dim_named("CD")),
+        ),
+        Pat::Op(
+            OpPat::new("matmul")
+                .arg(Pat::var("x"))
+                .arg(Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("b"))
+                        .arg(Pat::var("c"))
+                        .attrs_fields(concat_dim_named("CD")),
+                )),
+        ),
+    )
+    .with_law(
+        "cat(x@b, x@c) = x@cat(b,c) along the output axis — column blocks of a shared input merge into one matmul.",
+    )
+    .with_cond(cond_mm_cr())
+    .with_tag("prior_art")
+    .with_tag("fusion")
+}
+
+/// `x@cat(b,c,CD) → cat(x@b, x@c, CD)` — the column-block split,
+/// derivation `mm_concat_right`.
+///
+/// Python: `priorart.py` `MM_CONCAT_RIGHT_REV`, cond `_COND_MM_CR`,
+/// tags `prior_art`+`expansive`.
+pub fn mm_concat_right_rev() -> Law {
+    Law::new(
+        "mm_concat_right_rev",
+        Pat::Op(
+            OpPat::new("matmul").arg(Pat::var("x")).arg(Pat::Op(
+                OpPat::new("concat")
+                    .arg(Pat::var("b"))
+                    .arg(Pat::var("c"))
+                    .attrs_fields(concat_dim_named("CD")),
+            )),
+        ),
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::op("matmul", vec![Pat::var("x"), Pat::var("b")]))
+                .arg(Pat::op("matmul", vec![Pat::var("x"), Pat::var("c")]))
+                .attrs_fields(concat_dim_named("CD")),
+        ),
+    )
+    .with_law("Reverse column-block split (eqsat weighs both forms).")
+    .with_cond(cond_mm_cr())
+    .with_derivation("mm_concat_right")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `split(W, sizes=SZ, dim=-2, index)` — the weight-split view of the
+/// split-K pair; `SZ` is dspec-derived (forward) or bound by the LHS
+/// pattern (reverse).
+fn splitk_w(index: i64) -> Pat {
+    Pat::Op(
+        OpPat::new("split")
+            .arg(Pat::var("W"))
+            .attrs_fields(afields(vec![
+                ("sizes", af_bind("SZ")),
+                ("dim", af_lit(json!(-2))),
+                ("index", af_lit(json!(index))),
+            ])),
+    )
+}
+
+/// Python `_COND_MM_SPLITK` — the rank-2 GEMM scope plus the
+/// contraction-axis agreement (`a`'s `CD` axis IS its last) and the
+/// weight `-2` extent equation, all read through the shape table.
+fn cond_mm_splitk() -> Value {
+    json!([
+        "and",
+        ["rank", "a", "==", 2],
+        ["rank", "b", "==", 2],
+        ["dim-eq", "a", -2, "b", -2],
+        ["rank", "W", "==", 2],
+        ["axis", "a", "CD", -1],
+        [
+            "attr-cmp",
+            ["dim", "W", -2],
+            "==",
+            ["add", ["dim", "a", -1], ["dim", "b", -1]]
+        ]
+    ])
+}
+
+/// The split-K weight-split sizes: `SZ = (dim a -1, dim b -1)` — the
+/// two operands' contraction extents.
+fn dspec_splitk() -> Value {
+    json!({"SZ": ["tuple", ["dim", "a", -1], ["dim", "b", -1]]})
+}
+
+/// `matmul(concat(a,b,CD), W) → a@W_top + b@W_bot` — the split-K
+/// decomposition: the contraction axis partitions and the weight
+/// splits on its `-2` axis.
+///
+/// Python: `priorart.py` `MM_SPLITK`, cond `_COND_MM_SPLITK`, dspec
+/// `_DSPEC_SPLITK`, tags `prior_art`+`categorical`.
+pub fn mm_splitk() -> Law {
+    Law::new(
+        "mm_splitk",
+        Pat::Op(
+            OpPat::new("matmul")
+                .arg(Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("a"))
+                        .arg(Pat::var("b"))
+                        .attrs_fields(concat_dim_named("CD")),
+                ))
+                .arg(Pat::var("W")),
+        ),
+        Pat::op(
+            "add",
+            vec![
+                Pat::op(
+                    "matmul",
+                    vec![Pat::var("a"), splitk_w(0)],
+                ),
+                Pat::op(
+                    "matmul",
+                    vec![Pat::var("b"), splitk_w(1)],
+                ),
+            ],
+        ),
+    )
+    .with_law(
+        "(cat(a,b,-1)) @ W = a@W_top + b@W_bot — the split-K decomposition: the contraction axis partitions, the weight splits on its -2 axis (TASO).",
+    )
+    .with_cond(cond_mm_splitk())
+    .with_dspec(dspec_splitk())
+    .with_tag("prior_art")
+    .with_tag("categorical")
+}
+
+/// The split-K refold — `a@W_top + b@W_bot → matmul(concat(a,b,-1),
+/// W)`; the bound `SZ` must equal the operands' contraction extents
+/// (the unfold direction re-derives nothing — the guard pins it).
+///
+/// Python: `priorart.py` `MM_SPLITK_REV`, tags `prior_art`+`expansive`,
+/// derivation `mm_splitk`.
+pub fn mm_splitk_rev() -> Law {
+    Law::new(
+        "mm_splitk_rev",
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("matmul", vec![Pat::var("a"), splitk_w(0)]),
+                Pat::op("matmul", vec![Pat::var("b"), splitk_w(1)]),
+            ],
+        ),
+        Pat::Op(
+            OpPat::new("matmul")
+                .arg(Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("a"))
+                        .arg(Pat::var("b"))
+                        .attrs_lit(json!({"dim": -1})),
+                ))
+                .arg(Pat::var("W")),
+        ),
+    )
+    .with_law("The split-K refold — the two partial products merge into one contraction.")
+    .with_cond(json!([
+        "and",
+        ["rank", "a", "==", 2],
+        ["rank", "b", "==", 2],
+        ["dim-eq", "a", -2, "b", -2],
+        ["rank", "W", "==", 2],
+        [
+            "attr-cmp",
+            "SZ",
+            "==",
+            ["tuple", ["dim", "a", -1], ["dim", "b", -1]]
+        ],
+        [
+            "attr-cmp",
+            ["dim", "W", -2],
+            "==",
+            ["add", ["dim", "a", -1], ["dim", "b", -1]]
+        ]
+    ]))
+    .with_derivation("mm_splitk")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// Python `_COND_LIN_CAT` — the fused-projection guard: both weight
+/// operands rank-2 with agreeing `dim 1` (the output axis `linear`
+/// produces), and the output concat `CD` rides `x`'s last axis.
+fn cond_lin_cat() -> Value {
+    json!([
+        "and",
+        ["rank", "A", "==", 2],
+        ["rank", "B", "==", 2],
+        ["dim-eq", "A", 1, "B", 1],
+        ["axis", "x", "CD", -1]
+    ])
+}
+
+/// `cat(xAᵀ, xBᵀ, CD) → x[A;B]ᵀ` — the MergedColumnParallelLinear
+/// weight-row merge (TASO; the qkv_fuse class).
+///
+/// Python: `priorart.py` `LINEAR_CONCAT_W`, cond `_COND_LIN_CAT`,
+/// tags `prior_art`+`fusion`.
+pub fn linear_concat_w() -> Law {
+    Law::new(
+        "linear_concat_w",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::op("linear", vec![Pat::var("x"), Pat::var("A")]))
+                .arg(Pat::op("linear", vec![Pat::var("x"), Pat::var("B")]))
+                .attrs_fields(concat_dim_named("CD")),
+        ),
+        Pat::op(
+            "linear",
+            vec![
+                Pat::var("x"),
+                Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("A"))
+                        .arg(Pat::var("B"))
+                        .attrs_lit(json!({"dim": 0})),
+                ),
+            ],
+        ),
+    )
+    .with_law(
+        "cat(xAᵀ, xBᵀ) = x[A;B]ᵀ on the output axis — the MergedColumnParallelLinear merge (TASO).",
+    )
+    .with_cond(cond_lin_cat())
+    .with_tag("prior_art")
+    .with_tag("fusion")
+}
+
+/// `linear(x, cat(A,B,AD)) → cat(xAᵀ, xBᵀ, -1)` — the fused
+/// projection split; the `AD` axis must be `A`'s dim 0.
+///
+/// Python: `priorart.py` `LINEAR_CONCAT_W_REV`, tags
+/// `prior_art`+`expansive`, derivation `linear_concat_w`.
+pub fn linear_concat_w_rev() -> Law {
+    Law::new(
+        "linear_concat_w_rev",
+        Pat::op(
+            "linear",
+            vec![
+                Pat::var("x"),
+                Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("A"))
+                        .arg(Pat::var("B"))
+                        .attrs_fields(concat_dim_named("AD")),
+                ),
+            ],
+        ),
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::op("linear", vec![Pat::var("x"), Pat::var("A")]))
+                .arg(Pat::op("linear", vec![Pat::var("x"), Pat::var("B")]))
+                .attrs_lit(json!({"dim": -1})),
+        ),
+    )
+    .with_law("Reverse: split a fused projection into per-block linears.")
+    .with_cond(json!([
+        "and",
+        ["rank", "A", "==", 2],
+        ["rank", "B", "==", 2],
+        ["dim-eq", "A", 1, "B", 1],
+        ["axis", "A", "AD", 0]
+    ]))
+    .with_derivation("linear_concat_w")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// Python `_COND_LINEAR_BIAS` — the bias-epilogue guard: the
+/// `mm-shape-ok`/`rank W == 2` well-typedness pair, `b` broadcasting
+/// into `linear(x, W)`'s output grid (`_SPEC_LINEAR_OUT` =
+/// `mm-out x (transpose-out W)`), and `rank b <= 1`.
+fn cond_linear_bias() -> Value {
+    json!([
+        "and",
+        ["mm-shape-ok", "x", spec_wt()],
+        ["rank", "W", "==", 2],
+        ["bcast-into", "b", spec_linear_out()],
+        ["rank", "b", "<=", 1]
+    ])
+}
+
+/// `add(linear(x,W), b) → linear(x,W,b)` — the bias epilogue folds
+/// into the GEMM (Inductor's addmm; TASO's matmul+bias).
+///
+/// Python: `priorart.py` `LINEAR_BIAS_FOLD`, cond `_COND_LINEAR_BIAS`,
+/// tags `prior_art`+`fusion`.
+pub fn linear_bias_fold() -> Law {
+    Law::new(
+        "linear_bias_fold",
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]),
+                Pat::var("b"),
+            ],
+        ),
+        Pat::op("linear", vec![Pat::var("x"), Pat::var("W"), Pat::var("b")]),
+    )
+    .with_law(
+        "xWᵀ + b = linear(x, W, b) — the bias epilogue folds into the GEMM (Inductor's addmm; TASO's matmul+bias).",
+    )
+    .with_cond(cond_linear_bias())
+    .with_tag("prior_art")
+    .with_tag("fusion")
+}
+
+/// `add(b, linear(x,W)) → linear(x,W,b)` — the operand-swapped
+/// bias-epilogue fold.
+///
+/// Python: `priorart.py` `LINEAR_BIAS_FOLD_L`, cond
+/// `_COND_LINEAR_BIAS`, tags `prior_art`+`fusion`.
+pub fn linear_bias_fold_l() -> Law {
+    Law::new(
+        "linear_bias_fold_l",
+        Pat::op(
+            "add",
+            vec![
+                Pat::var("b"),
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]),
+            ],
+        ),
+        Pat::op("linear", vec![Pat::var("x"), Pat::var("W"), Pat::var("b")]),
+    )
+    .with_law("The operand-swapped bias-epilogue fold.")
+    .with_cond(cond_linear_bias())
+    .with_tag("prior_art")
+    .with_tag("fusion")
+}
+
+/// `linear(x,W,b) → add(linear(x,W), b)` — expose the fused bias as a
+/// pointwise epilogue; derivation `linear_bias_fold`.
+///
+/// Python: `priorart.py` `LINEAR_BIAS_EXPAND`, cond
+/// `_COND_LINEAR_BIAS`, tags `prior_art`+`expansive`.
+pub fn linear_bias_expand() -> Law {
+    Law::new(
+        "linear_bias_expand",
+        Pat::op("linear", vec![Pat::var("x"), Pat::var("W"), Pat::var("b")]),
+        Pat::op(
+            "add",
+            vec![
+                Pat::op("linear", vec![Pat::var("x"), Pat::var("W")]),
+                Pat::var("b"),
+            ],
+        ),
+    )
+    .with_law(
+        "Reverse: expose the fused bias as a pointwise epilogue (eqsat weighs fused vs spelled).",
+    )
+    .with_cond(cond_linear_bias())
+    .with_derivation("linear_bias_fold")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `add(linear(x,A,b1), linear(x,B,b2)) → linear(x, A+B, b1+b2)` —
+/// the affine-map weight merge (model-soup / LoRA-merge class).
+///
+/// Python: `priorart.py` `LINEAR_BIAS_MERGE`, cond
+/// `_COND_LIN_BIAS_MERGE` (`rank A == 2`, `rank B == 2`,
+/// `shape-compat A B`, `shape-compat b1 b2`), tags
+/// `prior_art`+`fusion`.
+pub fn linear_bias_merge() -> Law {
+    Law::new(
+        "linear_bias_merge",
+        Pat::op(
+            "add",
+            vec![
+                Pat::op(
+                    "linear",
+                    vec![Pat::var("x"), Pat::var("A"), Pat::var("b1")],
+                ),
+                Pat::op(
+                    "linear",
+                    vec![Pat::var("x"), Pat::var("B"), Pat::var("b2")],
+                ),
+            ],
+        ),
+        Pat::op(
+            "linear",
+            vec![
+                Pat::var("x"),
+                Pat::op("add", vec![Pat::var("A"), Pat::var("B")]),
+                Pat::op("add", vec![Pat::var("b1"), Pat::var("b2")]),
+            ],
+        ),
+    )
+    .with_law(
+        "linear(x,A,b1) + linear(x,B,b2) = linear(x, A+B, b1+b2) — the affine-map weight merge (model-soup / LoRA-merge class).",
+    )
+    .with_cond(json!([
+        "and",
+        ["rank", "A", "==", 2],
+        ["rank", "B", "==", 2],
+        ["shape-compat", "A", "B"],
+        ["shape-compat", "b1", "b2"]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("fusion")
+}
+
+// ---------------------------------------------------------------------------
+//  prior_art §1 — TASO: conv output merge (the Inception-style fold)
+// ---------------------------------------------------------------------------
+
+/// `_CONV_ATTR_MV`'s attr tails in Python order — the shared
+/// metavar names (`ST`/`PD`/`DL`/`GR`) bind both convs' attrs AND the
+/// merged conv's to the SAME spelling, so all three nodes carry the
+/// identical `attrs_fields`.
+const PA_CONV_TAILS: &[(&str, &[(&str, &str)])] = &[
+    ("", &[]),
+    ("_sp", &[("stride", "ST"), ("padding", "PD")]),
+    (
+        "_spdg",
+        &[
+            ("stride", "ST"),
+            ("padding", "PD"),
+            ("dilation", "DL"),
+            ("groups", "GR"),
+        ],
+    ),
+];
+
+/// `conv2d(x, W[, b], attrs…)` — the conv-merge operand pattern; the
+/// attr tail binds `ST`/`PD`/`DL`/`GR` per `_CONV_ATTR_MV`.
+fn pa_conv_pat(x: Pat, w: Pat, b: Option<Pat>, tail: &[(&str, &str)]) -> Pat {
+    let mut op = OpPat::new("conv2d").arg(x).arg(w);
+    if let Some(b) = b {
+        op = op.arg(b);
+    }
+    if tail.is_empty() {
+        // Python `attrs {}` — no declared attrs (the `Pat::op`
+        // convention: no `__attrs__` key).
+        Pat::Op(op)
+    } else {
+        Pat::Op(op.attrs_fields(afields(
+            tail.iter().map(|&(k, m)| (k, af_bind(m))).collect(),
+        )))
+    }
+}
+
+/// `_conv_merge_cond(attrs, bias)` — the same-geometry guard: `x`/`W1`
+/// rank-4 concrete, the input-channel agreement (`dim-eq x 1 W1 1`,
+/// plus `attr-eq GR 1` when `groups` is bound — groups>1 needs a
+/// channel interleave, not a plain cat), the filter-bank channel
+/// agreement, the output concat riding `x`'s channel axis (`CD` at
+/// axis 1), and the bias pair when present.
+fn pa_conv_merge_cond(has_groups: bool, bias: bool) -> Value {
+    let inc = if has_groups {
+        json!(["and", ["attr-eq", "GR", 1], ["dim-eq", "x", 1, "W1", 1]])
+    } else {
+        json!(["dim-eq", "x", 1, "W1", 1])
+    };
+    let mut items = vec![
+        json!(["concrete", "x"]),
+        json!(["rank", "x", "==", 4]),
+        json!(["concrete", "W1"]),
+        json!(["rank", "W1", "==", 4]),
+        inc,
+        json!(["dim-eq", "W1", 1, "W2", 1]),
+        json!(["axis", "x", "CD", 1]),
+    ];
+    if bias {
+        items.extend([
+            json!(["rank", "b1", "==", 1]),
+            json!(["dim-eq", "b1", 0, "W1", 0]),
+            json!(["rank", "b2", "==", 1]),
+            json!(["dim-eq", "b2", 0, "W2", 0]),
+        ]);
+    }
+    let mut cond = vec![json!("and")];
+    cond.extend(items);
+    Value::Array(cond)
+}
+
+/// `_make_conv_merge_rules` — `cat(conv(x,W1), conv(x,W2), ch) =
+/// conv(x, cat(W1,W2,0))`: two same-geometry convs over a shared
+/// input are one conv over the output-concat'd filter bank (TASO's
+/// conv-merge; the Inception parallel fold). Three attr tails
+/// (`""`/`"_sp"`/`"_spdg"`) × bias arity = six rules.
+fn pa_conv_merge_rules() -> Vec<Law> {
+    let mut out = Vec::new();
+    for &(suffix, tail) in PA_CONV_TAILS {
+        let has_groups = tail.iter().any(|&(_, m)| m == "GR");
+        for bias in [true, false] {
+            let bs = if bias { "" } else { "_nobias" };
+            let conv1 = pa_conv_pat(
+                Pat::var("x"),
+                Pat::var("W1"),
+                bias.then(|| Pat::var("b1")),
+                tail,
+            );
+            let conv2 = pa_conv_pat(
+                Pat::var("x"),
+                Pat::var("W2"),
+                bias.then(|| Pat::var("b2")),
+                tail,
+            );
+            let lhs = Pat::Op(
+                OpPat::new("concat")
+                    .arg(conv1)
+                    .arg(conv2)
+                    .attrs_fields(concat_dim_named("CD")),
+            );
+            // The merged filter bank: `concat(W1, W2, dim=0)` (and the
+            // bias pair likewise when present).
+            let cat0 = |p: Pat, q: Pat| {
+                Pat::Op(
+                    OpPat::new("concat")
+                        .arg(p)
+                        .arg(q)
+                        .attrs_lit(json!({"dim": 0})),
+                )
+            };
+            let w_cat = cat0(Pat::var("W1"), Pat::var("W2"));
+            let rhs = if bias {
+                pa_conv_pat(
+                    Pat::var("x"),
+                    w_cat,
+                    Some(cat0(Pat::var("b1"), Pat::var("b2"))),
+                    tail,
+                )
+            } else {
+                pa_conv_pat(Pat::var("x"), w_cat, None, tail)
+            };
+            out.push(
+                Law::new(
+                    format!("conv_out_merge{suffix}{bs}"),
+                    lhs,
+                    rhs,
+                )
+                .with_law(
+                    "cat(conv(x,W1), conv(x,W2)) = conv(x, cat(W1,W2,0)) on the channel axis — same-geometry convs merge into one (TASO's conv-merge; the Inception parallel fold).",
+                )
+                .with_cond(pa_conv_merge_cond(has_groups, bias))
+                .with_tag("prior_art")
+                .with_tag("fusion"),
+            );
+        }
+    }
+    out
+}
+
 /// `pow_one`: `pow(u, P) → u` guarded by `P` being Const 1.
 ///
 /// Python: `priorart.py` `POW_ONE`, tags `prior_art`+`simplification`.
@@ -7606,7 +8271,16 @@ pub fn attention() -> Vec<Law> {
 /// round-trips — `concat_split2`'s `attr-len` guard rides the
 /// ported attr vocabulary verbatim — the `stack_fold`/
 /// `stack_expand` bridge pair, and the `concat_pull_*`
-/// pointwise-commutation families), then the §1 index-view tail
+/// pointwise-commutation families), then the §1 TASO
+/// matmul/linear/conv merges (`mm_concat_left`/`_rev`,
+/// `mm_concat_right`/`_rev`, the `mm_splitk`/`_rev` pair whose
+/// `dim`-expr `attr-cmp`s and `SZ` dspec ride the ported shape
+/// vocabulary verbatim, the `linear_concat_w`/`_rev` projection
+/// merges, the `linear_bias_*` epilogue fold/expand/merge family
+/// over the `mm-shape-ok`/`transpose-out`/`mm-out`/`bcast-into`
+/// specs, and the six `conv_out_merge*` same-geometry conv folds —
+/// the shared `ST`/`PD`/`DL`/`GR` attr metavars bind both convs and
+/// the merged conv identically), then the §1 index-view tail
 /// `mul_unsq_rev` and the §2 no-op
 /// elimination block (`contiguous_id`/`clone_id`/`alias_id`/
 /// `detach_id`/`detach_inplace_id`, the `*_idem` cast family,
@@ -7663,6 +8337,22 @@ pub fn prior_art() -> Vec<Law> {
     ];
     laws.extend(concat_pull_unary_rules());
     laws.extend(concat_pull_binary_rules());
+    laws.extend([
+        // -- §1 TASO matmul/linear concat merges and split-K
+        mm_concat_left(),
+        mm_concat_left_rev(),
+        mm_concat_right(),
+        mm_concat_right_rev(),
+        mm_splitk(),
+        mm_splitk_rev(),
+        linear_concat_w(),
+        linear_concat_w_rev(),
+        linear_bias_fold(),
+        linear_bias_fold_l(),
+        linear_bias_expand(),
+        linear_bias_merge(),
+    ]);
+    laws.extend(pa_conv_merge_rules());
     laws.extend([
         // -- §1 index-view tail + §2 no-op elimination
         mul_unsq_rev(),

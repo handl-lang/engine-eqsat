@@ -602,8 +602,10 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     assert_eq!(simpl.laws(), expected.as_slice());
 
     // kit-eqsat pack "prior_art" — the portable PRIOR_ART_RULES
-    // slice: the §1 TASO concat-structure block, const-guarded folds
-    // whose `cond`/`dspec` trees are the
+    // slice: the §1 TASO concat-structure block, the §1 TASO
+    // matmul/linear/conv merges (mm_concat_*/mm_splitk/
+    // linear_concat_w/linear_bias_*/conv_out_merge*), const-guarded
+    // folds whose `cond`/`dspec` trees are the
     // `cond.py` spelling carried as record data, the §2 no-op
     // elimination + reduction-algebra + activation-decomposition
     // blocks, the §2 pointwise
@@ -612,7 +614,7 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     // `shaped`/`shape-eq`/`bcast` grid guard is declarative data.
     let pa = LawSet::from_json(pack("prior_art")).unwrap();
     assert_eq!(pa.laws(), builtin::prior_art().as_slice());
-    assert_eq!(pa.laws().len(), 135);
+    assert_eq!(pa.laws().len(), 153);
     // Every guarded record compiles — the corpus exercises the whole
     // stage-1 vocabulary end to end.
     assert_eq!(pa.compile().unwrap().len(), pa.laws().len());
