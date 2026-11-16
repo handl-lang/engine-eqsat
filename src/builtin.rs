@@ -2398,6 +2398,185 @@ pub fn mul_const_div() -> Law {
 }
 
 // ---------------------------------------------------------------------------
+//  prior_art §1 — index-view distributions and bridges (the
+//  `SELECT_PULL_RULES`/`UNBIND_SELECT`/`SELECT_TO_SLICE`/
+//  `SLICE_TO_SELECT` block ahead of `MUL_UNSQ_REV`).  The
+//  `select_mul`-family broadcast-grid guard and the `_COND_AXIS`/
+//  `_COND_SEL_RANGE` axis+bounds guards are the ported `cond`
+//  vocabulary verbatim; `select_to_slice`'s `E = I+1` end mints
+//  through `dspec`.
+// ---------------------------------------------------------------------------
+
+/// `select(u, dim=D, index=I)` — the index-pick view with both attr
+/// metavars bound (the `select_mul` spelling shared by the pull
+/// family).
+fn select_view(t: Pat) -> Pat {
+    Pat::Op(OpPat::new("select").arg(t).attrs_fields(afields(vec![
+        ("dim", af_bind("D")),
+        ("index", af_bind("I")),
+    ])))
+}
+
+/// Python `_COND_SEL_PAIR` — the broadcast-grid guard shared by the
+/// select-distribution laws (identical to `select_mul`'s).
+fn cond_sel_pair() -> Value {
+    json!([
+        "and",
+        ["dim-eq-attr", "u", "D", "v", "D"],
+        ["shaped", ["bcast", "u", "v"]]
+    ])
+}
+
+/// `SELECT_PULL_RULES` — `op(sel(u), sel(v)) → sel(op(u, v))` for
+/// `op` in `add`/`sub`/`div`: the elementwise op commutes with the
+/// index pick under the paired-axis broadcast-grid guard.
+///
+/// Python: `priorart.py` `_select_pull`, cond `_COND_SEL_PAIR`,
+/// tags `prior_art`+`simplification`.
+fn select_pull_rules() -> Vec<Law> {
+    ["add", "sub", "div"]
+        .into_iter()
+        .map(|op| {
+            Law::new(
+                format!("select_{op}"),
+                Pat::op(
+                    op,
+                    vec![select_view(Pat::var("u")), select_view(Pat::var("v"))],
+                ),
+                select_view(Pat::op(op, vec![Pat::var("u"), Pat::var("v")])),
+            )
+            .with_law(format!(
+                "{op} commutes with select — the select_mul guard: same index on the same axis and a denoting broadcast grid."
+            ))
+            .with_cond(cond_sel_pair())
+            .with_tag("prior_art")
+            .with_tag("simplification")
+        })
+        .collect()
+}
+
+/// `unbind_select`: `unbind(u, d)[i] → select(u, d, i)` — the
+/// exported unbind carries its picked index (the getitem-folded
+/// spelling).
+///
+/// Python: `priorart.py` `UNBIND_SELECT`, unguarded, tags
+/// `prior_art`+`simplification`.
+pub fn unbind_select() -> Law {
+    Law::new(
+        "unbind_select",
+        Pat::Op(
+            OpPat::new("unbind").arg(Pat::var("u")).attrs_fields(afields(vec![
+                ("dim", af_bind("D")),
+                ("index", af_bind("I")),
+            ])),
+        ),
+        select_view(Pat::var("u")),
+    )
+    .with_law(
+        "unbind(u, d)[i] IS select(u, d, i) — the exported unbind carries its picked index (the getitem-folded spelling).",
+    )
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `select_to_slice`: `select(u, d, i) → squeeze(slice(u, d, i,
+/// i+1), d)` — the unit-width slice spelling of an index pick; the
+/// slice end mints `I+1` through `dspec`.
+///
+/// Python: `priorart.py` `SELECT_TO_SLICE`, cond `_COND_SEL_RANGE`
+/// (`_COND_AXIS` + the `I` int/nonneg/in-range triple), dspec
+/// `{"E": I+1}`, tags `prior_art`+`simplification`.
+pub fn select_to_slice() -> Law {
+    let mut cond = cond_axis();
+    cond.as_array_mut()
+        .expect("cond_axis is an and-node")
+        .extend([
+            json!(["attr-type", "I", "int"]),
+            json!(["attr-cmp", "I", ">=", 0]),
+            json!([
+                "attr-cmp",
+                ["nth", ["shape", "u"], ["attr", "D"]],
+                ">",
+                ["attr", "I"]
+            ]),
+        ]);
+    Law::new(
+        "select_to_slice",
+        select_view(Pat::var("u")),
+        Pat::Op(
+            OpPat::new("squeeze")
+                .arg(Pat::Op(
+                    OpPat::new("slice").arg(Pat::var("u")).attrs_fields(afields(vec![
+                        ("dim", af_bind("D")),
+                        ("start", af_bind("I")),
+                        ("end", af_bind("E")),
+                    ])),
+                ))
+                .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+        ),
+    )
+    .with_law(
+        "select(u, d, i) = squeeze(slice(u, d, i, i+1), d) — the unit-width slice spelling of an index pick.",
+    )
+    .with_cond(cond)
+    .with_dspec(json!({"E": ["add", ["attr", "I"], 1]}))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `slice_to_select`: `slice(u, d, i, i+1) → unsqueeze(select(u,
+/// d, i), d)` — the one-element slice is the re-widened index
+/// pick; `E == S+1` is the unit-width read, derivation
+/// `select_to_slice`.
+///
+/// Python: `priorart.py` `SLICE_TO_SELECT`, cond `_COND_AXIS` +
+/// the `S` int/nonneg/in-range triple + `E == S+1`, tags
+/// `prior_art`+`simplification`.
+pub fn slice_to_select() -> Law {
+    let mut cond = cond_axis();
+    cond.as_array_mut()
+        .expect("cond_axis is an and-node")
+        .extend([
+            json!(["attr-type", "S", "int"]),
+            json!(["attr-cmp", "S", ">=", 0]),
+            json!([
+                "attr-cmp",
+                ["nth", ["shape", "u"], ["attr", "D"]],
+                ">",
+                ["attr", "S"]
+            ]),
+            json!(["attr-cmp", "E", "==", ["add", ["attr", "S"], 1]]),
+        ]);
+    Law::new(
+        "slice_to_select",
+        Pat::Op(
+            OpPat::new("slice").arg(Pat::var("u")).attrs_fields(afields(vec![
+                ("dim", af_bind("D")),
+                ("start", af_bind("S")),
+                ("end", af_bind("E")),
+            ])),
+        ),
+        Pat::Op(
+            OpPat::new("unsqueeze")
+                .arg(Pat::Op(
+                    OpPat::new("select").arg(Pat::var("u")).attrs_fields(afields(vec![
+                        ("dim", af_bind("D")),
+                        ("index", af_bind("S")),
+                    ])),
+                ))
+                .attrs_fields(afields(vec![("dim", af_bind("D"))])),
+        ),
+    )
+    .with_law(
+        "slice(u, d, i, i+1) = unsqueeze(select(u, d, i), d) — the one-element slice is the re-widened index pick.",
+    )
+    .with_cond(cond)
+    .with_derivation("select_to_slice")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+// ---------------------------------------------------------------------------
 //  prior_art §2 head — `mul_unsq_rev` (the §1 index-view tail) and the
 //  no-op elimination block.  The declarative `cond=` guards port
 //  verbatim; the procedural `check=` hooks are re-authored as `cond`
@@ -8141,6 +8320,464 @@ pub fn layout() -> Vec<Law> {
 }
 
 // ---------------------------------------------------------------------------
+//  prior_art §3 — zoo-corpus named transforms.  The unguarded expands
+//  (`adaln_one_plus`, `dropout_*`, `addcmul`/`addcdiv`/`lerp`,
+//  `ste_fold*`) and the shape-cond folds (`linear_out_channel*`,
+//  `onehot_matmul_embed`) ride the ported vocabulary verbatim;
+//  `rope_rh_to_cat`'s procedural `_check_rope_equiv` is re-authored
+//  as a `cond` tree — the same posture as the layout pack (attr-vs-
+//  shape-extent comparisons the `attr-cmp` expr operands already
+//  form).  `layer_norm_expand_{plain,affine}` stay Python-side: the
+//  `_derive_ln` mint needs a `range(len−len(nd), len)` axis tuple
+//  the expr algebra cannot form; `instance_norm_expand`/
+//  `group_norm_expand` stay for the same wall plus a `prod`-over-
+//  dims / divisibility veto the vocabulary cannot shape.
+// ---------------------------------------------------------------------------
+
+/// `rope_rh_to_cat`: the HF rotate-half `x·cat(c,c) +
+/// cat(−x2,x1)·cat(s,s)` IS the Llama cat-pair `cat(x1c−x2s,
+/// x2c+x1s)` when the tables are the half-table duplicated — the
+/// `_check_rope_equiv` half-split guard re-authored as `cond`.
+///
+/// Python: `priorart.py` `ROPE_RH_TO_CAT`, check
+/// `_check_rope_equiv` → `cond`, tags `prior_art`+`fusion`.
+pub fn rope_rh_to_cat() -> Law {
+    let concat_dim = || afields(vec![("dim", af_bind("CD"))]);
+    let doubled = |t: Pat| {
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(t.clone())
+                .arg(t)
+                .attrs_fields(concat_dim()),
+        )
+    };
+    // -- LHS: x·cat(c,c) + cat(−x2, x1)·cat(s,s)  (the HF spelling)
+    let lhs = Pat::op(
+        "add",
+        vec![
+            Pat::op("mul", vec![Pat::var("x"), doubled(Pat::var("c"))]),
+            Pat::op(
+                "mul",
+                vec![
+                    Pat::Op(
+                        OpPat::new("concat")
+                            .arg(Pat::op("neg", vec![att_slice(Pat::var("x"), "I2")]))
+                            .arg(att_slice(Pat::var("x"), "I1"))
+                            .attrs_fields(concat_dim()),
+                    ),
+                    doubled(Pat::var("s")),
+                ],
+            ),
+        ],
+    );
+    // -- RHS: cat(x1·c − x2·s, x2·c + x1·s)  (the Llama pair spelling)
+    let (x1, x2) = (
+        att_slice(Pat::var("x"), "I1"),
+        att_slice(Pat::var("x"), "I2"),
+    );
+    let rhs = Pat::Op(
+        OpPat::new("concat")
+            .arg(Pat::op(
+                "sub",
+                vec![
+                    Pat::op("mul", vec![x1.clone(), Pat::var("c")]),
+                    Pat::op("mul", vec![x2.clone(), Pat::var("s")]),
+                ],
+            ))
+            .arg(Pat::op(
+                "add",
+                vec![
+                    Pat::op("mul", vec![x2, Pat::var("c")]),
+                    Pat::op("mul", vec![x1, Pat::var("s")]),
+                ],
+            ))
+            .attrs_fields(concat_dim()),
+    );
+    Law::new("rope_rh_to_cat", lhs, rhs)
+        .with_law(
+            "x·cat(c,c) + cat(−x2,x1)·cat(s,s) IS cat(x1c−x2s, x2c+x1s) — the HF rotate-half and the Llama cat-pair rotary are the same transform when the cos/sin tables are the half-table duplicated (the standard emb.repeat(2) spelling).",
+        )
+        .with_cond(json!([
+            "and",
+            ["rank", "x", ">", 0],
+            ["attr-type", "CD", "int"],
+            ["attr-type", "I1D", "int"],
+            ["attr-type", "I2D", "int"],
+            ["attr-type", "I1A", "int"],
+            ["attr-type", "I1E", "int"],
+            ["attr-type", "I2A", "int"],
+            ["attr-type", "I2E", "int"],
+            ["attr-cmp", "CD", ">=", 0],
+            ["attr-cmp", "CD", "<", ["len", ["shape", "x"]]],
+            ["attr-cmp", "I1D", "==", "CD"],
+            ["attr-cmp", "I2D", "==", "CD"],
+            [
+                "attr-cmp",
+                ["mod", ["nth", ["shape", "x"], ["attr", "CD"]], 2],
+                "==",
+                0
+            ],
+            ["attr-cmp", "I1A", "==", 0],
+            [
+                "attr-cmp",
+                "I1E",
+                "==",
+                ["floordiv", ["nth", ["shape", "x"], ["attr", "CD"]], 2]
+            ],
+            [
+                "attr-cmp",
+                "I2A",
+                "==",
+                ["floordiv", ["nth", ["shape", "x"], ["attr", "CD"]], 2]
+            ],
+            [
+                "attr-cmp",
+                "I2E",
+                ">=",
+                ["nth", ["shape", "x"], ["attr", "CD"]]
+            ]
+        ]))
+        .with_tag("prior_art")
+        .with_tag("fusion")
+}
+
+/// `ste_fold`: `x + (y − x).detach() → y` — the straight-through
+/// estimator's value idiom, guarded to the no-broadcast corner
+/// (`bcast(x,y)` must BE `y`'s shape).
+///
+/// Python: `priorart.py` `STE_FOLD`, cond `_COND_STE`, tags
+/// `prior_art`+`simplification`.
+pub fn ste_fold() -> Law {
+    Law::new(
+        "ste_fold",
+        Pat::op(
+            "add",
+            vec![
+                Pat::var("x"),
+                Pat::op(
+                    "detach",
+                    vec![Pat::op("sub", vec![Pat::var("y"), Pat::var("x")])],
+                ),
+            ],
+        ),
+        Pat::var("y"),
+    )
+    .with_law(
+        "x + (y − x).detach() = y — the straight-through estimator's value idiom (the quant STE: w + (ŵ−w).detach() evaluates to ŵ) — guarded to the no-broadcast corner.",
+    )
+    .with_cond(json!(["shape-eq", "y", ["bcast", "x", "y"]]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `ste_fold_l`: the operand-swapped STE spelling.
+///
+/// Python: `priorart.py` `STE_FOLD_L`, cond `_COND_STE`, tags
+/// `prior_art`+`simplification`.
+pub fn ste_fold_l() -> Law {
+    Law::new(
+        "ste_fold_l",
+        Pat::op(
+            "add",
+            vec![
+                Pat::op(
+                    "detach",
+                    vec![Pat::op("sub", vec![Pat::var("y"), Pat::var("x")])],
+                ),
+                Pat::var("x"),
+            ],
+        ),
+        Pat::var("y"),
+    )
+    .with_law("The operand-swapped STE spelling.")
+    .with_cond(json!(["shape-eq", "y", ["bcast", "x", "y"]]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// Python `_COND_LINEAR_XW` (the `priorart.py` spelling — the
+/// `mm-shape-ok`/`rank W == 2` well-typedness pair over
+/// `_SPEC_WT`).
+fn cond_pa_linear_xw() -> Value {
+    json!([
+        "and",
+        ["mm-shape-ok", "x", spec_wt()],
+        ["rank", "W", "==", 2]
+    ])
+}
+
+/// `linear(x, W)` — the bias-free projection both
+/// `linear_out_channel` directions share.
+fn linear_xw() -> Pat {
+    Pat::op("linear", vec![Pat::var("x"), Pat::var("W")])
+}
+
+/// `c·reshape`'s `shape=CV` attr — the `(W[0], 1)` output-channel
+/// view `linear_out_channel` mints through `dspec`.
+fn reshape_c_cv() -> Pat {
+    Pat::Op(
+        OpPat::new("reshape")
+            .arg(Pat::var("c"))
+            .attrs_fields(afields(vec![("shape", af_bind("CV"))])),
+    )
+}
+
+/// Python `_DSPEC_OUT_CH` — `CV = (dim(W,0), 1)`: the per-output-
+/// channel scale viewed `(o, 1)` for the weight fold.
+fn dspec_out_ch() -> Value {
+    json!({"CV": ["tuple", ["dim", "W", 0], 1]})
+}
+
+/// `linear_out_channel`: `c·linear(x, W) → linear(x, W·reshape(c,
+/// (o,1)))` — the per-output-channel scale folds into the weight
+/// (the AWQ/dequant scale migration; the output-side twin of
+/// `linear_channel_scale`).
+///
+/// Python: `priorart.py` `LINEAR_OUT_CHANNEL`, cond `_COND_LINEAR_XW`
+/// plus the `c` rank-1-or-unit-channel guard and `dim-eq c -1 W 0`,
+/// dspec `_DSPEC_OUT_CH`, tags `prior_art`+`fusion`.
+pub fn linear_out_channel() -> Law {
+    let mut cond = cond_pa_linear_xw();
+    cond.as_array_mut().expect("cond is an and-node").extend([
+        json!(["shaped", "c"]),
+        json!(["or", ["rank", "c", "==", 1], ["dim-eq-const", "c", 0, 1]]),
+        json!(["dim-eq", "c", -1, "W", 0]),
+    ]);
+    Law::new(
+        "linear_out_channel",
+        Pat::op("mul", vec![linear_xw(), Pat::var("c")]),
+        Pat::op(
+            "linear",
+            vec![
+                Pat::var("x"),
+                Pat::op("mul", vec![Pat::var("W"), reshape_c_cv()]),
+            ],
+        ),
+    )
+    .with_law(
+        "c·(xWᵀ) = x(W∘ĉ)ᵀ with ĉ = c viewed (o,1) — the per-output-channel scale folds into the weight (the AWQ/dequant scale migration; the output-side twin of linear_channel_scale).",
+    )
+    .with_cond(cond)
+    .with_dspec(dspec_out_ch())
+    .with_tag("prior_art")
+    .with_tag("fusion")
+}
+
+/// `linear_out_channel_rev`: the folded channel scale unfolds back
+/// to a runtime `mul` — `CV` must BE `(dim(W,0), 1)`, derivation
+/// `linear_out_channel`.
+///
+/// Python: `priorart.py` `LINEAR_OUT_CHANNEL_REV`, cond
+/// `_COND_LINEAR_XW` + the `c` guard + `dim-eq` + the `CV`
+/// attr-cmp, tags `prior_art`+`expansive`.
+pub fn linear_out_channel_rev() -> Law {
+    let mut cond = cond_pa_linear_xw();
+    cond.as_array_mut().expect("cond is an and-node").extend([
+        json!(["shaped", "c"]),
+        json!(["or", ["rank", "c", "==", 1], ["dim-eq-const", "c", 0, 1]]),
+        json!(["dim-eq", "c", -1, "W", 0]),
+        json!(["attr-cmp", "CV", "==", ["tuple", ["dim", "W", 0], 1]]),
+    ]);
+    Law::new(
+        "linear_out_channel_rev",
+        Pat::op(
+            "linear",
+            vec![
+                Pat::var("x"),
+                Pat::op("mul", vec![Pat::var("W"), reshape_c_cv()]),
+            ],
+        ),
+        Pat::op("mul", vec![linear_xw(), Pat::var("c")]),
+    )
+    .with_law("Reverse: unfold the folded channel scale back to a runtime mul.")
+    .with_cond(cond)
+    .with_derivation("linear_out_channel")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `adaln_one_plus`: `u·(1+s) → u + u·s` — the AdaLN-Zero `1 +
+/// scale` idiom spelled as distributivity (derivable through the
+/// pointwise factor laws — kept as the direct edge).
+///
+/// Python: `priorart.py` `ADALN_ONE_PLUS`, unguarded, tags
+/// `prior_art`+`expansive`.
+pub fn adaln_one_plus() -> Law {
+    Law::new(
+        "adaln_one_plus",
+        Pat::op(
+            "mul",
+            vec![
+                Pat::var("u"),
+                Pat::op("add", vec![Pat::constant(json!(1)), Pat::var("s")]),
+            ],
+        ),
+        Pat::op("add", vec![Pat::var("u"), Pat::op("mul", vec![Pat::var("u"), Pat::var("s")])]),
+    )
+    .with_law(
+        "u·(1+s) = u + u·s — the AdaLN-Zero ``1 + scale`` idiom spelled as distributivity (derivable through the pointwise factor laws — kept as the direct edge).",
+    )
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `dropout_eval`: `dropout(u, p, train=False) → u` — the eval-mode
+/// strip (Inductor's `aten.dropout` elimination).
+///
+/// Python: `priorart.py` `DROPOUT_EVAL`, `train` literal-pinned,
+/// tags `prior_art`+`simplification`.
+pub fn dropout_eval() -> Law {
+    Law::new(
+        "dropout_eval",
+        Pat::Op(
+            OpPat::new("dropout").arg(Pat::var("u")).attrs_fields(afields(vec![
+                ("p", af_bind("P")),
+                ("train", af_lit(json!(false))),
+            ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "dropout(u, p, train=False) = u — the eval-mode strip (Inductor's aten.dropout elimination).",
+    )
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `dropout_zero`: `dropout(u, p=0, train) → u` — a zero drop rate
+/// is the identity in either mode.
+///
+/// Python: `priorart.py` `DROPOUT_ZERO`, `p` literal-0.0-pinned,
+/// tags `prior_art`+`simplification`.
+pub fn dropout_zero() -> Law {
+    Law::new(
+        "dropout_zero",
+        Pat::Op(
+            OpPat::new("dropout")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("p", af_lit(json!(0.0))),
+                    ("train", af_bind("T")),
+                ])),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("dropout(u, p=0) = u — a zero drop rate is the identity in either mode.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `onehot_matmul_embed`: `to(dtype)(one_hot(i, N)) @ W →
+/// embedding(W, i)` — the one-hot matmul IS a row gather (the cast
+/// is the exported spelling — `one_hot` emits int64 which cannot
+/// contract a float weight; spelled `double` to ride the fp64 eval
+/// path). `W` rank-2 with `dim(W,-2) == N`.
+///
+/// Python: `priorart.py` `ONEHOT_MATMUL_EMBED`, cond `rank W == 2` +
+/// `attr-cmp (dim W -2) == N`, tags `prior_art`+`fusion`.
+pub fn onehot_matmul_embed() -> Law {
+    Law::new(
+        "onehot_matmul_embed",
+        Pat::op(
+            "matmul",
+            vec![
+                Pat::op(
+                    "double",
+                    vec![Pat::Op(
+                        OpPat::new("one_hot").arg(Pat::var("i")).attrs_fields(afields(vec![
+                            ("num_classes", af_bind("N")),
+                        ])),
+                    )],
+                ),
+                Pat::var("W"),
+            ],
+        ),
+        Pat::op("embedding", vec![Pat::var("W"), Pat::var("i")]),
+    )
+    .with_law(
+        "to(dtype)(one_hot(i, N)) @ W = embedding(W, i) — the one-hot matmul IS a row gather (TASO/vocab-projection fold; the cast is the exported spelling — one_hot emits int64 which cannot contract a float weight; spelled ``double`` to ride the fp64 eval path).",
+    )
+    .with_cond(json!([
+        "and",
+        ["rank", "W", "==", 2],
+        ["attr-cmp", ["dim", "W", -2], "==", ["attr", "N"]]
+    ]))
+    .with_tag("prior_art")
+    .with_tag("fusion")
+}
+
+/// `addcmul_expand`: `addcmul(t, a, b) → t + a·b` — the fused op's
+/// spelled work (value=1 default).
+///
+/// Python: `priorart.py` `ADDCMUL_EXPAND`, unguarded, tags
+/// `prior_art`+`expansive`.
+pub fn addcmul_expand() -> Law {
+    Law::new(
+        "addcmul_expand",
+        Pat::op("addcmul", vec![Pat::var("t"), Pat::var("a"), Pat::var("b")]),
+        Pat::op(
+            "add",
+            vec![
+                Pat::var("t"),
+                Pat::op("mul", vec![Pat::var("a"), Pat::var("b")]),
+            ],
+        ),
+    )
+    .with_law("addcmul(t, a, b) = t + a·b — the fused op's spelled work (value=1 default).")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `addcdiv_expand`: `addcdiv(t, a, b) → t + a/b`.
+///
+/// Python: `priorart.py` `ADDCDIV_EXPAND`, unguarded, tags
+/// `prior_art`+`expansive`.
+pub fn addcdiv_expand() -> Law {
+    Law::new(
+        "addcdiv_expand",
+        Pat::op("addcdiv", vec![Pat::var("t"), Pat::var("a"), Pat::var("b")]),
+        Pat::op(
+            "add",
+            vec![
+                Pat::var("t"),
+                Pat::op("div", vec![Pat::var("a"), Pat::var("b")]),
+            ],
+        ),
+    )
+    .with_law("addcdiv(t, a, b) = t + a/b.")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `lerp_expand`: `lerp(x, y, w) → x + w·(y−x)` — the interpolation's
+/// definition.
+///
+/// Python: `priorart.py` `LERP_EXPAND`, unguarded, tags
+/// `prior_art`+`expansive`.
+pub fn lerp_expand() -> Law {
+    Law::new(
+        "lerp_expand",
+        Pat::op("lerp", vec![Pat::var("x"), Pat::var("y"), Pat::var("w")]),
+        Pat::op(
+            "add",
+            vec![
+                Pat::var("x"),
+                Pat::op(
+                    "mul",
+                    vec![
+                        Pat::var("w"),
+                        Pat::op("sub", vec![Pat::var("y"), Pat::var("x")]),
+                    ],
+                ),
+            ],
+        ),
+    )
+    .with_law("lerp(x, y, w) = x + w·(y−x) — the interpolation's definition.")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+// ---------------------------------------------------------------------------
 //  Law packs — mirror the Python bank collections.
 // ---------------------------------------------------------------------------
 
@@ -8280,7 +8917,12 @@ pub fn attention() -> Vec<Law> {
 /// over the `mm-shape-ok`/`transpose-out`/`mm-out`/`bcast-into`
 /// specs, and the six `conv_out_merge*` same-geometry conv folds —
 /// the shared `ST`/`PD`/`DL`/`GR` attr metavars bind both convs and
-/// the merged conv identically), then the §1 index-view tail
+/// the merged conv identically), then the §1 index-view
+/// distributions/bridges (`select_add`/`select_sub`/`select_div`
+/// under the `select_mul` broadcast-grid guard, `unbind_select`,
+/// the `select_to_slice`/`slice_to_select` unit-width bridge pair
+/// — `_COND_AXIS`/`_COND_SEL_RANGE` verbatim, `E = I+1` minted
+/// through `dspec`), the §1 index-view tail
 /// `mul_unsq_rev` and the §2 no-op
 /// elimination block (`contiguous_id`/`clone_id`/`alias_id`/
 /// `detach_id`/`detach_inplace_id`, the `*_idem` cast family,
@@ -8317,7 +8959,19 @@ pub fn attention() -> Vec<Law> {
 /// `div_const_to_mul`, `mul_const_div`), and the spelled-unit
 /// folds (`add_zeroslike_r`/`sub_zeroslike_r`/`mul_oneslike_r`/
 /// `div_oneslike_r`) whose `shaped`/`shape-eq`/`bcast` grid guard
-/// rides the ported shape vocabulary. Every other member reads
+/// rides the ported shape vocabulary, and the §3 zoo-corpus named
+/// transforms (`rope_rh_to_cat` — `_check_rope_equiv` re-authored
+/// as a `cond` tree over `attr-cmp` expr operands — the `ste_fold*`
+/// pair, `linear_out_channel`/`_rev` over the
+/// `mm-shape-ok`/`transpose-out`/`dim-eq`/`dim-eq-const` specs +
+/// the `CV` tuple dspec, `adaln_one_plus`, `dropout_eval`/
+/// `dropout_zero`, `onehot_matmul_embed`, and the
+/// `addcmul`/`addcdiv`/`lerp` expands). `layer_norm_expand_*`,
+/// `instance_norm_expand`, and `group_norm_expand` stay
+/// Python-side — their `_derive_ln`/`_derive_*_expand` mints need
+/// a `range`-over-dims axis tuple and a `prod`-over-dims /
+/// divisibility veto the expr algebra cannot form. Every other
+/// member reads
 /// shapes (`shape`/`dim` specs, `attr-range`, `rank`, broadcast
 /// predicates) or tensor channels — unported — carries procedural
 /// `check`/`derive` hooks, or is unguarded but outside this
@@ -8353,6 +9007,8 @@ pub fn prior_art() -> Vec<Law> {
         linear_bias_merge(),
     ]);
     laws.extend(pa_conv_merge_rules());
+    laws.extend(select_pull_rules());
+    laws.extend([unbind_select(), select_to_slice(), slice_to_select()]);
     laws.extend([
         // -- §1 index-view tail + §2 no-op elimination
         mul_unsq_rev(),
@@ -8471,6 +9127,19 @@ pub fn prior_art() -> Vec<Law> {
         sub_zeroslike_r(),
         mul_oneslike_r(),
         div_oneslike_r(),
+        // -- §3 zoo-corpus named transforms
+        rope_rh_to_cat(),
+        ste_fold(),
+        ste_fold_l(),
+        linear_out_channel(),
+        linear_out_channel_rev(),
+        adaln_one_plus(),
+        dropout_eval(),
+        dropout_zero(),
+        onehot_matmul_embed(),
+        addcmul_expand(),
+        addcdiv_expand(),
+        lerp_expand(),
     ]);
     laws
 }

@@ -609,12 +609,16 @@ fn laws_corpus_files_load_and_match_the_builtin_packs() {
     // `cond.py` spelling carried as record data, the §2 no-op
     // elimination + reduction-algebra + activation-decomposition
     // blocks, the §2 pointwise
-    // idempotence/parity family, the const-free scalar folds, and
-    // the `*_zeroslike_r`/`*_oneslike_r` spelled-unit folds whose
-    // `shaped`/`shape-eq`/`bcast` grid guard is declarative data.
+    // idempotence/parity family, the const-free scalar folds, the
+    // `*_zeroslike_r`/`*_oneslike_r` spelled-unit folds whose
+    // `shaped`/`shape-eq`/`bcast` grid guard is declarative data,
+    // the §1 index-view select/slice bridges, and the §3
+    // zoo-corpus named transforms (`rope_rh_to_cat`'s
+    // `_check_rope_equiv` re-authored as `cond`; the LN/IN/GN
+    // expands stay Python-side — range-over-dims derives).
     let pa = LawSet::from_json(pack("prior_art")).unwrap();
     assert_eq!(pa.laws(), builtin::prior_art().as_slice());
-    assert_eq!(pa.laws().len(), 153);
+    assert_eq!(pa.laws().len(), 171);
     // Every guarded record compiles — the corpus exercises the whole
     // stage-1 vocabulary end to end.
     assert_eq!(pa.compile().unwrap().len(), pa.laws().len());
