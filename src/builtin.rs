@@ -934,6 +934,332 @@ pub fn pow_to_rsqrt() -> Law {
     .with_tag("simplification")
 }
 
+// ---------------------------------------------------------------------------
+//  prior_art §1 — TASO substitutions: concat structure (20 laws)
+// ---------------------------------------------------------------------------
+
+/// The shared `dim` attr-metavariable spec of the concat family —
+/// `Op.make(…, dim="D")` binds one axis across every operand and the
+/// result.
+fn concat_dim() -> BTreeMap<String, AttrField> {
+    afields(vec![("dim", af_bind("D"))])
+}
+
+/// The `unsqueeze(·, dim="D")` operand view of the stack bridge.
+fn unsq_dim(t: Pat) -> Pat {
+    Pat::Op(OpPat::new("unsqueeze").arg(t).attrs_fields(concat_dim()))
+}
+
+/// `concat_single`: `concat(u, dim=D) → u`.
+///
+/// Python: `priorart.py` `CONCAT_SINGLE`, tags
+/// `prior_art`+`simplification`.
+pub fn concat_single() -> Law {
+    Law::new(
+        "concat_single",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::var("u"))
+                .attrs_fields(concat_dim()),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("concat of one tensor is the tensor (TASO cat-noop).")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `concat_flat_l`: `concat(concat(a,b,D),c,D) → concat(a,b,c,D)`.
+///
+/// Python: `priorart.py` `CONCAT_FLAT_L`, tags
+/// `prior_art`+`expansive`.
+pub fn concat_flat_l() -> Law {
+    Law::new(
+        "concat_flat_l",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("a"))
+                        .arg(Pat::var("b"))
+                        .attrs_fields(concat_dim()),
+                ))
+                .arg(Pat::var("c"))
+                .attrs_fields(concat_dim()),
+        ),
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::var("a"))
+                .arg(Pat::var("b"))
+                .arg(Pat::var("c"))
+                .attrs_fields(concat_dim()),
+        ),
+    )
+    .with_law(
+        "concat is associative: cat(cat(a,b),c) = cat(a,b,c) — the n-ary flatten (TASO concat associativity; the KV-cache append chain).",
+    )
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `concat_flat_r`: `concat(a,concat(b,c,D),D) → concat(a,b,c,D)`.
+///
+/// Python: `priorart.py` `CONCAT_FLAT_R`, tags
+/// `prior_art`+`expansive`.
+pub fn concat_flat_r() -> Law {
+    Law::new(
+        "concat_flat_r",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::var("a"))
+                .arg(Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("b"))
+                        .arg(Pat::var("c"))
+                        .attrs_fields(concat_dim()),
+                ))
+                .attrs_fields(concat_dim()),
+        ),
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(Pat::var("a"))
+                .arg(Pat::var("b"))
+                .arg(Pat::var("c"))
+                .attrs_fields(concat_dim()),
+        ),
+    )
+    .with_law("concat(a, cat(b,c)) = cat(a,b,c) — right-nested flatten.")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `chunk(u, chunks, dim=D, index)` with the literal chunk count and
+/// index pinned and the axis bound to the family's `D`.
+fn chunk_attrs(chunks: i64, index: i64) -> BTreeMap<String, AttrField> {
+    afields(vec![
+        ("chunks", af_lit(json!(chunks))),
+        ("dim", af_bind("D")),
+        ("index", af_lit(json!(index))),
+    ])
+}
+
+/// `concat_chunk2`: `cat(chunk0₂(u), chunk1₂(u)) → u`.
+///
+/// Python: `priorart.py` `CONCAT_CHUNK2`, tags
+/// `prior_art`+`simplification`.
+pub fn concat_chunk2() -> Law {
+    let chunk = |index: i64| {
+        Pat::Op(
+            OpPat::new("chunk")
+                .arg(Pat::var("u"))
+                .attrs_fields(chunk_attrs(2, index)),
+        )
+    };
+    Law::new(
+        "concat_chunk2",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(chunk(0))
+                .arg(chunk(1))
+                .attrs_fields(concat_dim()),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "cat(chunk0(u), chunk1(u)) = u — the split/merge round-trip (TASO); holds for odd extents too since chunk splits first-big.",
+    )
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `concat_chunk3`: `cat(chunk0₃(u), chunk1₃(u), chunk2₃(u)) → u`.
+///
+/// Python: `priorart.py` `CONCAT_CHUNK3`, tags
+/// `prior_art`+`simplification`.
+pub fn concat_chunk3() -> Law {
+    let chunk = |index: i64| {
+        Pat::Op(
+            OpPat::new("chunk")
+                .arg(Pat::var("u"))
+                .attrs_fields(chunk_attrs(3, index)),
+        )
+    };
+    Law::new(
+        "concat_chunk3",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(chunk(0))
+                .arg(chunk(1))
+                .arg(chunk(2))
+                .attrs_fields(concat_dim()),
+        ),
+        Pat::var("u"),
+    )
+    .with_law("The 3-way split/merge round-trip.")
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `concat_split2`: `cat(split0(u,SZ), split1(u,SZ)) → u` when `SZ`
+/// holds exactly two sizes — the uneven split's round-trip.
+///
+/// Python: `priorart.py` `CONCAT_SPLIT2`, cond
+/// `("attr-len", "SZ", "==", 2)` verbatim, tags
+/// `prior_art`+`simplification`.
+pub fn concat_split2() -> Law {
+    let split = |index: i64| {
+        Pat::Op(
+            OpPat::new("split")
+                .arg(Pat::var("u"))
+                .attrs_fields(afields(vec![
+                    ("sizes", af_bind("SZ")),
+                    ("dim", af_bind("D")),
+                    ("index", af_lit(json!(index))),
+                ])),
+        )
+    };
+    Law::new(
+        "concat_split2",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(split(0))
+                .arg(split(1))
+                .attrs_fields(concat_dim()),
+        ),
+        Pat::var("u"),
+    )
+    .with_law(
+        "cat(split0(u), split1(u)) = u — the uneven split's round-trip (two sizes cover the axis).",
+    )
+    .with_cond(json!(["attr-len", "SZ", "==", 2]))
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `stack_fold`: `cat(unsqueeze(a,D), unsqueeze(b,D), D) →
+/// stack(a,b,D)`.
+///
+/// Python: `priorart.py` `STACK_FOLD`, tags
+/// `prior_art`+`simplification`.
+pub fn stack_fold() -> Law {
+    Law::new(
+        "stack_fold",
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(unsq_dim(Pat::var("a")))
+                .arg(unsq_dim(Pat::var("b")))
+                .attrs_fields(concat_dim()),
+        ),
+        Pat::Op(
+            OpPat::new("stack")
+                .arg(Pat::var("a"))
+                .arg(Pat::var("b"))
+                .attrs_fields(concat_dim()),
+        ),
+    )
+    .with_law(
+        "cat(unsqueeze(a,d), unsqueeze(b,d), d) = stack(a,b,d) — torch.stack IS the cat of the unsqueezed pair.",
+    )
+    .with_tag("prior_art")
+    .with_tag("simplification")
+}
+
+/// `stack_expand`: `stack(a,b,D) → cat(unsqueeze(a,D),
+/// unsqueeze(b,D), D)` — the decomposition direction, derivation
+/// `stack_fold`.
+///
+/// Python: `priorart.py` `STACK_EXPAND`, tags
+/// `prior_art`+`expansive`.
+pub fn stack_expand() -> Law {
+    Law::new(
+        "stack_expand",
+        Pat::Op(
+            OpPat::new("stack")
+                .arg(Pat::var("a"))
+                .arg(Pat::var("b"))
+                .attrs_fields(concat_dim()),
+        ),
+        Pat::Op(
+            OpPat::new("concat")
+                .arg(unsq_dim(Pat::var("a")))
+                .arg(unsq_dim(Pat::var("b")))
+                .attrs_fields(concat_dim()),
+        ),
+    )
+    .with_law("stack(a,b,d) decomposes to the unsqueeze+concat pair.")
+    .with_derivation("stack_fold")
+    .with_tag("prior_art")
+    .with_tag("expansive")
+}
+
+/// `_concat_pull(op)` — `cat(op(a), op(b), D) → op(cat(a,b,D))` for
+/// the unary pointwise ops.
+fn concat_pull_unary_rules() -> Vec<Law> {
+    [
+        "neg", "abs", "relu", "sigmoid", "silu", "tanh", "gelu", "exp", "square",
+    ]
+    .into_iter()
+    .map(|op| {
+        Law::new(
+            format!("concat_pull_{op}"),
+            Pat::Op(
+                OpPat::new("concat")
+                    .arg(Pat::op(op, vec![Pat::var("a")]))
+                    .arg(Pat::op(op, vec![Pat::var("b")]))
+                    .attrs_fields(concat_dim()),
+            ),
+            Pat::op(
+                op,
+                vec![Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var("a"))
+                        .arg(Pat::var("b"))
+                        .attrs_fields(concat_dim()),
+                )],
+            ),
+        )
+        .with_law(format!(
+            "cat({op}(a), {op}(b)) = {op}(cat(a,b)) — the pointwise op commutes with the partition (TASO concat-pointwise)."
+        ))
+        .with_tag("prior_art")
+        .with_tag("simplification")
+    })
+    .collect()
+}
+
+/// `_concat_pull2(op)` — `cat(op(a1,b1), op(a2,b2), D) →
+/// op(cat(a1,a2,D), cat(b1,b2,D))` for the binary pointwise ops.
+fn concat_pull_binary_rules() -> Vec<Law> {
+    ["add", "mul", "sub"]
+        .into_iter()
+        .map(|op| {
+            let cat = |x: &str, y: &str| {
+                Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::var(x))
+                        .arg(Pat::var(y))
+                        .attrs_fields(concat_dim()),
+                )
+            };
+            Law::new(
+                format!("concat_pull_{op}"),
+                Pat::Op(
+                    OpPat::new("concat")
+                        .arg(Pat::op(op, vec![Pat::var("a1"), Pat::var("b1")]))
+                        .arg(Pat::op(op, vec![Pat::var("a2"), Pat::var("b2")]))
+                        .attrs_fields(concat_dim()),
+                ),
+                Pat::op(op, vec![cat("a1", "a2"), cat("b1", "b2")]),
+            )
+            .with_law(format!(
+                "cat({op}(a1,b1), {op}(a2,b2)) = {op}(cat(a1,a2), cat(b1,b2)) — the pointwise pair commutes with the partition."
+            ))
+            .with_tag("prior_art")
+            .with_tag("simplification")
+        })
+        .collect()
+}
+
 /// `pow_one`: `pow(u, P) → u` guarded by `P` being Const 1.
 ///
 /// Python: `priorart.py` `POW_ONE`, tags `prior_art`+`simplification`.
@@ -7274,7 +7600,14 @@ pub fn attention() -> Vec<Law> {
 }
 
 /// The portable slice of `PRIOR_ART_RULES` (Python order):
-/// the §1 index-view tail `mul_unsq_rev` and the §2 no-op
+/// the §1 TASO concat-structure block (`concat_single`, the
+/// `concat_flat_l`/`concat_flat_r` n-ary flattens,
+/// `concat_chunk2`/`concat_chunk3`/`concat_split2` split-merge
+/// round-trips — `concat_split2`'s `attr-len` guard rides the
+/// ported attr vocabulary verbatim — the `stack_fold`/
+/// `stack_expand` bridge pair, and the `concat_pull_*`
+/// pointwise-commutation families), then the §1 index-view tail
+/// `mul_unsq_rev` and the §2 no-op
 /// elimination block (`contiguous_id`/`clone_id`/`alias_id`/
 /// `detach_id`/`detach_inplace_id`, the `*_idem` cast family,
 /// the squeeze/unsqueeze/reshape/broadcast/slice/index_select/
@@ -7318,6 +7651,19 @@ pub fn attention() -> Vec<Law> {
 /// Python bank's opt-in `prior_art` preset.
 pub fn prior_art() -> Vec<Law> {
     let mut laws = vec![
+        // -- §1 TASO concat structure
+        concat_single(),
+        concat_flat_l(),
+        concat_flat_r(),
+        concat_chunk2(),
+        concat_chunk3(),
+        concat_split2(),
+        stack_fold(),
+        stack_expand(),
+    ];
+    laws.extend(concat_pull_unary_rules());
+    laws.extend(concat_pull_binary_rules());
+    laws.extend([
         // -- §1 index-view tail + §2 no-op elimination
         mul_unsq_rev(),
         contiguous_id(),
@@ -7325,7 +7671,7 @@ pub fn prior_art() -> Vec<Law> {
         alias_id(),
         detach_id(),
         detach_inplace_id(),
-    ];
+    ]);
     laws.extend(cast_idem_rules());
     laws.extend([
         unsqueeze_squeeze(),
