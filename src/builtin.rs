@@ -5681,8 +5681,41 @@ fn qk_scores() -> Pat {
     )
 }
 
-/// Python `_COND_SCORE_T` + `_COND_SM_DIM` + `_COND_SDPA_BASE`.
-fn cond_sdpa_base() -> serde_json::Value {
+/// The score tensor's shape spec — `matmul(Q, Kᵀ)`'s output
+/// (Python `_QK_MM`).
+fn qk_mm() -> serde_json::Value {
+    json!(["mm-out", "Q", ["transpose-out", "K", "TD1", "TD2"]])
+}
+
+/// `softmax(dim=SD)` last-axis guard against the score tensor's
+/// broadcast rank (Python `_sm_axis`).  `mask` is the broadcast
+/// operand the softmax input adds on top of the scores — `"M"` for
+/// the additive family, `"MK"` for masked_fill's keep-mask, `None`
+/// for the mask-free spelling.  Checking `SD` against `rank(Q)`
+/// (the old `("axis","Q","SD",-1)`) let a spelled `softmax(dim=1)`
+/// on rank-4 scores under a rank-2 `Q` fold into `sdpa` — which
+/// always normalizes the key axis — a measured verify FAIL.
+fn sm_axis(mask: Option<&str>) -> serde_json::Value {
+    let spec = match mask {
+        Some(m) => json!(["bcast", qk_mm(), m]),
+        None => qk_mm(),
+    };
+    // `bcast` reads an unresolvable operand as a wildcard, so the
+    // `shaped` conjuncts keep an unknown score/mask shape from
+    // silently borrowing the other operand's rank.
+    let mut conjuncts = vec![json!(["shaped", qk_mm()])];
+    if let Some(m) = mask {
+        conjuncts.push(json!(["shaped", m]));
+    }
+    conjuncts.push(json!(["axis", spec, "SD", -1]));
+    let mut and = vec![json!("and")];
+    and.extend(conjuncts);
+    serde_json::Value::Array(and)
+}
+
+/// Python `_COND_SCORE_T` + `_COND_SM_DIM` + `_COND_SDPA_BASE` —
+/// one base per mask spelling.
+fn cond_sdpa_base(mask: Option<&str>) -> serde_json::Value {
     json!([
         "and",
         [
@@ -5692,13 +5725,13 @@ fn cond_sdpa_base() -> serde_json::Value {
             ["attr-type", "TD2", "int"],
             ["axes-last2", "K", "TD1", "TD2"]
         ],
-        ["axis", "Q", "SD", -1]
+        sm_axis(mask)
     ])
 }
 
 /// Python `_COND_SDPA_SCALED` — `_COND_SDPA_BASE` + `("const-num","S")`.
-fn cond_sdpa_scaled() -> serde_json::Value {
-    json!(["and", cond_sdpa_base(), ["const-num", "S"]])
+fn cond_sdpa_scaled(mask: Option<&str>) -> serde_json::Value {
+    json!(["and", cond_sdpa_base(mask), ["const-num", "S"]])
 }
 
 /// `softmax(<scores>, dim=SD)` — the spelled attention core.
@@ -5734,10 +5767,10 @@ fn sdpa_fold_rules() -> Vec<Law> {
         (
             "mul",
             || Pat::op("mul", vec![qk_scores(), Pat::var("S")]),
-            cond_sdpa_scaled(),
+            cond_sdpa_scaled(Some("M")),
             json!([
                 "and",
-                cond_sdpa_base(),
+                cond_sdpa_base(Some("MK")),
                 ["const-cmp", "F", "<", -1e30],
                 ["const-num", "S"]
             ]),
@@ -5746,10 +5779,10 @@ fn sdpa_fold_rules() -> Vec<Law> {
         (
             "div",
             || Pat::op("div", vec![qk_scores(), Pat::var("S")]),
-            cond_sdpa_scaled(),
+            cond_sdpa_scaled(Some("M")),
             json!([
                 "and",
-                cond_sdpa_base(),
+                cond_sdpa_base(Some("MK")),
                 ["const-cmp", "F", "<", -1e30],
                 ["const-num", "S"]
             ]),
@@ -5758,8 +5791,12 @@ fn sdpa_fold_rules() -> Vec<Law> {
         (
             "",
             qk_scores,
-            cond_sdpa_base(),
-            json!(["and", cond_sdpa_base(), ["const-cmp", "F", "<", -1e30]]),
+            cond_sdpa_base(Some("M")),
+            json!([
+                "and",
+                cond_sdpa_base(Some("MK")),
+                ["const-cmp", "F", "<", -1e30]
+            ]),
             json!({"SC": 1.0}),
         ),
     ];
@@ -5838,7 +5875,7 @@ fn sdpa_fold_rules() -> Vec<Law> {
         (
             "sdpa_fold_nomask",
             Pat::op("matmul", vec![spelled_softmax(qk_scores()), Pat::var("V")]),
-            json!(["and", cond_sdpa_base(), qv_rank.clone(), v_rank.clone()]),
+            json!(["and", cond_sdpa_base(None), qv_rank.clone(), v_rank.clone()]),
             json!({"SC": 1.0}),
             "softmax(q kᵀ) v is sdpa(q, k, v, scale=1) — the mask-free spelled attention is one fused kernel (the add/masked_fill family's empty-mask row).".to_string(),
         ),
@@ -5853,7 +5890,7 @@ fn sdpa_fold_rules() -> Vec<Law> {
             ),
             json!([
                 "and",
-                cond_sdpa_scaled(),
+                cond_sdpa_scaled(None),
                 qv_rank.clone(),
                 v_rank.clone()
             ]),
@@ -5871,7 +5908,7 @@ fn sdpa_fold_rules() -> Vec<Law> {
             ),
             json!([
                 "and",
-                cond_sdpa_scaled(),
+                cond_sdpa_scaled(None),
                 qv_rank.clone(),
                 v_rank.clone()
             ]),
