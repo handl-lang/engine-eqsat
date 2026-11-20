@@ -86,4 +86,4 @@ sibling checkouts are needed; a plain clone test-runs as-is.
 
 ## License
 
-MIT OR Apache-2.0.
+MIT.
