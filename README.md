@@ -1,15 +1,14 @@
-# hnl-engine-eqsat
+# engine-eqsat
 
-The e-graph **search interpretation** over kernel `Term`s —
-ADR-0174 phase P2 / ADR-0175 (`eqsat → engine-eqsat-* + kit-eqsat`).
+`hnl-engine-eqsat` — the e-graph **search interpretation** over kernel
+`Term`s.
 
-A thin interpretation crate: it consumes [`handl-egraph`](https://github.com/handl-lang/egraph)
-(the finished Rust e-graph — union-find, compiled matcher, bounded
-saturation, deterministic extraction, `ProofEdge` provenance, and the
-total kernel↔pattern `term_bridge`) and [`hnl-engine`](https://github.com/handl-lang/engine)
-as libraries. The public API speaks only `hnl_engine::Term`; law
-patterns live in the crate's own [`pat`] language and compile into
-the e-graph's internal term domain, which never crosses the boundary.
+A thin interpretation crate: it consumes `handl-egraph` (the Rust e-graph —
+union-find, compiled matcher, bounded saturation, deterministic extraction,
+`ProofEdge` provenance, and the total kernel↔pattern `term_bridge`) and
+`hnl-engine` as libraries. The public API speaks only `hnl_engine::Term`;
+law patterns live in the crate's own `pat` language and compile into the
+e-graph's internal term domain, which never crosses the boundary.
 
 ```rust
 use hnl_engine::Term;
@@ -36,17 +35,15 @@ assert_eq!(out.term, Term::constant(json!(2)));
 
 ## API surface
 
-- [`optimize`] / [`saturate`] / [`extract_best`] — lift → saturate →
+- `optimize` / `saturate` / `extract_best` — lift → saturate →
   extract → lower over kernel `Term`s; the saturated
-  [`EGraph`](https://docs.rs/handl-egraph) (provenance included) is
-  returned for inspection.
-- [`Law`] + [`pat`] — the law/pattern language, plus the P2
-  contracts (ADR-0177, stages 1–4 landed):
+  `EGraph` (provenance included) is returned for inspection.
+- `Law` + `pat` — the law/pattern language, plus the contracts:
   - **law records** — `LAW_FORMAT = 2` JSON via
     `Law::to_data`/`from_data` and `lawset::LawSet::from_json` /
     `from_data`; `cond`/`dspec` guards are *interpreted* by
     `guard` over `handl_egraph::BoundEnv` (the `cond.py` port,
-    incl. stage-4's flat-map/repeat pairing guards and shape-reading
+    incl. flat-map/repeat pairing guards and shape-reading
     dspec channels). The tensor channels (`tval`/`tapp`) and
     procedural `check`/`derive` hooks refuse by name — the
     `missing_hooks` honesty posture, never a silent drop.
@@ -60,8 +57,7 @@ assert_eq!(out.term, Term::constant(json!(2)));
     `CostSpec` data, `EGraphEngine` the sole impl; `src/bin/
     eqsat-run.rs` is the CLI front end.
 - **law corpus** — the canonical `LAW_FORMAT = 2` corpus (243
-  records, 8 packs) lives in
-  [`handl-kit-eqsat`](https://github.com/handl-lang/kit-eqsat)
+  records, 8 packs) lives in `handl-kit-eqsat`
   (`data/laws/*.json`), consumed here as a dev-dependency in the
   contract tests. `laws/` keeps only `reshape_flatten_demo.json`
   (the UNSOUND attrs-bind matcher demo, quarantined engine-side);
@@ -71,14 +67,23 @@ assert_eq!(out.term, Term::constant(json!(2)));
 
 ## Status
 
-P2 stages 1–4 landed: unconditional *and* `cond`/`dspec`-guarded law
-packs ported from `mlopt_core.laws.tensor` (`simplification`,
-`categorical`, opt-in `prior_art`/`pointwise_factor`/`attention`,
-plus the kit-side `prim_folds` minted records), the serialized law
-format, the guard interpreter, shape inference, cost specs, and the
-`SearchEngine` trait. ADR-0177 remains proposed pending ratification.
+Unconditional *and* `cond`/`dspec`-guarded law packs ported from
+`mlopt_core.laws.tensor` (`simplification`, `categorical`, opt-in
+`prior_art`/`pointwise_factor`/`attention`, plus the kit-side
+`prim_folds` minted records), the serialized law format, the guard
+interpreter, shape inference, cost specs, and the `SearchEngine` trait.
 Git-install only (`publish = false`).
+
+## Development
+
+```bash
+cargo xtask gate        # fmt --check → clippy -D warnings → test → doc
+```
+
+`cargo xtask` wraps the repo's `xtask/` crate (`fmt`, `clippy`, `test`, `doc`,
+`check`, `gate`); `ci.sh` is the gate entry. Deps resolve from git, so no
+sibling checkouts are needed; a plain clone test-runs as-is.
 
 ## License
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0.
