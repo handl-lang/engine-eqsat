@@ -87,3 +87,7 @@ sibling checkouts are needed; a plain clone test-runs as-is.
 ## License
 
 MIT.
+
+## Documentation
+
+<https://handl-lang.github.io/docs/engine-eqsat/>

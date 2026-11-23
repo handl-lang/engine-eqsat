@@ -72,20 +72,14 @@ live in `handl-lang/host:project/reports/engine-eqsat-spike.md`.
 `handl-egraph` (`handl-lang/egraph` — the finished e-graph port),
 `hnl-engine` (`handl-lang/engine` — the `Term` kernel), `serde_json`;
 dev-dep `handl-kit-eqsat` (`handl-lang/kit-eqsat` — the law corpus).
-All git `branch = "main"` deps; the `[patch]` dev-link tables in
-`Cargo.toml` resolve them to sibling checkouts locally (regenerate
-with `scripts/dev-link.sh` if the dep set changes — the markers are
-`# dev-link: begin/end`).
+All git `branch = "main"` deps; the manifest carries no `[patch]`
+tables — local sibling resolution is the gitignored workspace-root
+`.cargo/config.toml` (`/home/luis/GitHub/handl-lang/.cargo/config.toml`).
 
 ## Verification
 
 ```sh
-cargo test
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
+cargo run --manifest-path xtask/Cargo.toml -- gate   # fmt → clippy → test → doc
 ```
 
-`ci.sh` runs the same gate (fmt → clippy → test → doc is *not* the
-layout here — it is egraph's `doctor|check|test|ci` stage model;
-run `bash ci.sh` for the full gate).
+or `bash ci.sh` for the same gate (fmt → clippy → test → doc).

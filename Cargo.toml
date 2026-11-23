@@ -5,6 +5,8 @@ edition = "2024"
 description = "The e-graph search interpretation over kernel `Term`s (ADR-0174 P2 / ADR-0175): equality saturation + deterministic extraction, speaking only `hnl_engine::Term` at the boundary."
 license = "MIT"
 repository = "https://github.com/handl-lang/engine-eqsat"
+homepage = "https://handl-lang.github.io/docs/engine-eqsat/"
+documentation = "https://handl-lang.github.io/docs/engine-eqsat/"
 readme = "README.md"
 keywords = ["handl", "engine", "egraph", "equality-saturation", "search"]
 categories = ["development-tools", "compilers"]
@@ -31,42 +33,6 @@ serde_json = "1"
 # `emit_laws` output destined for kit-eqsat's `data/laws/`.
 handl-kit-eqsat = { git = "https://github.com/handl-lang/kit-eqsat", branch = "main" }
 
-# dev-link: begin
-[patch."https://github.com/handl-lang/egraph"]
-handl-egraph = { path = "../egraph" }
-[patch."https://github.com/handl-lang/engine"]
-hnl-engine = { path = "../engine" }
-[patch."https://github.com/handl-lang/kernel"]
-handl-defining-handl = { path = "../kernel/crates/defining-handl" }
-handl-calculus = { path = "../kernel/crates/handl-calculus" }
-handl-ext = { path = "../kernel/crates/handl-ext" }
-handl-language = { path = "../kernel/crates/handl-language" }
-handl-ops = { path = "../kernel/crates/handl-ops" }
-handl-value = { path = "../kernel/crates/handl-value" }
-handl-lib-ops = { path = "../kernel/crates/ops" }
-handl-lib-prim = { path = "../kernel/crates/prim" }
-handl-lib-prim-handl = { path = "../kernel/crates/prim-handl" }
-[patch."https://github.com/handl-lang/kit-eqsat"]
-handl-kit-eqsat = { path = "../kit-eqsat/crates/handl-kit-eqsat" }
-# dev-link: end
-
-[patch."https://github.com/handl-lang/lib-bytes"]
-handl-lib-bytes = { path = "../lib-bytes" }
-
-[patch."https://github.com/handl-lang/lib-cmp"]
-handl-lib-cmp = { path = "../lib-cmp" }
-
-[patch."https://github.com/handl-lang/lib-error"]
-handl-lib-error = { path = "../lib-error" }
-
-[patch."https://github.com/handl-lang/lib-mood"]
-handl-lib-mood = { path = "../lib-mood" }
-
-[patch."https://github.com/handl-lang/lib-obj"]
-handl-lib-obj = { path = "../lib-obj" }
-
-[patch."https://github.com/handl-lang/lib-comb"]
-handl-lib-comb = { path = "../lib-comb" }
-
-[patch."https://github.com/handl-lang/lib-type"]
-handl-lib-type = { path = "../lib-type" }
+# No `[patch]` tables here: committed manifests must resolve from git alone
+# (a `../<sibling>` path breaks every external clone). Local sibling
+# overrides live in the gitignored workspace-root `.cargo/config.toml`.
