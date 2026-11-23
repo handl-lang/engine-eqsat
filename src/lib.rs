@@ -7,8 +7,8 @@
 //! pattern matcher, bounded saturation, deterministic extraction,
 //! `ProofEdge` provenance, and the total kernel↔pattern
 //! `term_bridge`) and [`hnl_engine`] (the `Term` kernel) as
-//! libraries, exactly as `hnl-engine-transform-rewrite` consumes
-//! `hnl-engine-transform`.
+//! libraries, exactly as `hnl-tool-transform-rewrite` consumes
+//! `hnl-tool-transform`.
 //!
 //! ## Boundary contract
 //!
