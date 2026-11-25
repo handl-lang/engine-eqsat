@@ -82,4 +82,4 @@ tables — local sibling resolution is the gitignored workspace-root
 cargo run --manifest-path xtask/Cargo.toml -- gate   # fmt → clippy → test → doc
 ```
 
-or `bash ci.sh` for the same gate (fmt → clippy → test → doc).
+or `workflows/gate.yaml` for the same gate (fmt → clippy → test → doc).
