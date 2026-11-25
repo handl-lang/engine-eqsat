@@ -2,6 +2,7 @@
 name = "hnl-engine-eqsat"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "The e-graph search interpretation over kernel `Term`s (ADR-0174 P2 / ADR-0175): equality saturation + deterministic extraction, speaking only `hnl_engine::Term` at the boundary."
 license = "MIT"
 repository = "https://github.com/handl-lang/engine-eqsat"
